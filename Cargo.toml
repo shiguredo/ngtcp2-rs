@@ -1,0 +1,29 @@
+[workspace]
+# edition 2024 に対応した feature 解決を使う
+resolver = "3"
+members = [
+  "ngtcp2",
+  "ngtcp2-sys",
+  "tokio-ngtcp2",
+]
+# 相互運用テストは quiche (BoringSSL) と s2n-quic をビルドするため、通常の
+# `cargo test` に依存とビルド時間を持ち込まないよう別の workspace にしている。
+# `make interop-test` で実行する。
+exclude = ["interop"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.93"
+
+[workspace.dependencies]
+shiguredo_ngtcp2 = { path = "ngtcp2", version = "=2026.1.0-canary.0" }
+shiguredo_ngtcp2_sys = { path = "ngtcp2-sys", version = "=2026.1.0-canary.0" }
+
+# 3 クレートは常に同時にリリースする。バージョンを揃えておくことで、
+# 公開時に path 依存が crates.io の該当バージョンへ解決される
+# (cargo package は path を剥がして version を使う)
+
+[profile.dev]
+# aws-lc の C コードはパニックしないため unwind を明示する。
+# テストは dev プロファイルの設定を引き継ぐ。
+panic = "unwind"

@@ -1,0 +1,75 @@
+[package]
+name = "fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.93"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# ルートの workspace とは別の workspace にする
+#
+# fuzz ターゲットは nightly の sanitizer でビルドするため、本体の workspace の
+# ビルド (stable) と分けておく。
+[workspace]
+
+[[bin]]
+doc = false
+name = "accept_initial"
+path = "fuzz_targets/accept_initial.rs"
+test = false
+
+[[bin]]
+doc = false
+name = "conn_read_pkt"
+path = "fuzz_targets/conn_read_pkt.rs"
+test = false
+
+[[bin]]
+doc = false
+name = "decode_packet_version"
+path = "fuzz_targets/decode_packet_version.rs"
+test = false
+
+[[bin]]
+doc = false
+name = "split_packets"
+path = "fuzz_targets/split_packets.rs"
+test = false
+
+[[bin]]
+doc = false
+name = "varint_decode"
+path = "fuzz_targets/varint_decode.rs"
+test = false
+
+[[bin]]
+doc = false
+name = "verify_new_token"
+path = "fuzz_targets/verify_new_token.rs"
+test = false
+
+[[bin]]
+doc = false
+name = "verify_retry_token"
+path = "fuzz_targets/verify_retry_token.rs"
+test = false
+
+[dependencies]
+# fuzz 入力からの構造化データ生成 (接続 fuzz のロール選択に使う)
+arbitrary = { version = "1.4", features = ["derive"] }
+# fuzz ターゲットのランタイム (libFuzzer)
+libfuzzer-sys = "0.4"
+# サーバー接続に使う自己署名証明書の生成
+rcgen = "0.14"
+
+[dependencies.shiguredo_ngtcp2]
+path = "../ngtcp2"
+# 常に ngtcp2 をソースからビルドする (source-build feature)
+#
+# 既定は GitHub Releases の prebuilt をダウンロードするが、開発中のバージョンには
+# リリースが無い。リリース済みの prebuilt ではなく、手元のソースからビルドした
+# ngtcp2 を対象にする。
+features = ["source-build"]

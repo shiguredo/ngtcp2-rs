@@ -1,0 +1,57 @@
+name: Fuzzing
+
+# fuzz は実行時間が長いため push では回さず、Actions から手動で起動する
+on:
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: 各 fuzz ターゲットの最大実行時間（秒）
+        required: false
+        default: "300"
+        type: string
+
+jobs:
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-24.04
+    # ngtcp2 と aws-lc をソースからビルドした上で各ターゲットを実行するため
+    # CI より長く取る
+    timeout-minutes: 90
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - run: rustup update stable
+
+      # fuzz はルートの workspace とは別の workspace のため、ci.yml では検査して
+      # いない。fmt と clippy はここで検査する (crate の公開 API だけを使うため
+      # stable でもビルドできる)
+      - name: Check the fuzz workspace
+        working-directory: fuzz
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets -- -D warnings
+
+      # fuzz ターゲットは nightly の sanitizer でビルドする
+      - name: Set up nightly Rust toolchain
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+
+      - name: Run fuzz targets
+        working-directory: fuzz
+        run: |
+          MAX_TIME="${{ inputs.max_total_time }}"
+          for target in $(cargo +nightly fuzz list); do
+            echo "=== Fuzzing ${target} ==="
+            cargo +nightly fuzz run "${target}" -- -max_total_time="${MAX_TIME}"
+          done
+
+      - name: Upload fuzz crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ github.run_id }}
+          path: fuzz/artifacts/
+          retention-days: 7

@@ -1,0 +1,60 @@
+[package]
+name = "shiguredo_ngtcp2_sys"
+version = "2026.1.0-canary.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "FFI bindings for the ngtcp2 QUIC library"
+readme = "README.md"
+homepage = "https://github.com/shiguredo/ngtcp2-rs"
+repository = "https://github.com/shiguredo/ngtcp2-rs"
+license = "Apache-2.0"
+build = "build.rs"
+links = "ngtcp2"
+# ルートの LICENSE / README.md はクレート tarball に入らないため、
+# クレート直下に実ファイルを置いて個別に指定する。
+# links 属性を持つクレートは build.rs を必ず同梱する必要がある。
+include = ["/LICENSE", "/README.md", "/build.rs", "/src/**"]
+
+# 以降は外部ライブラリビルド用のメタデータ
+# (この内容は build.rs の中からのみ参照される)
+[package.metadata.external-dependencies]
+# ngtcp2 本体のリポジトリから取得するブランチ
+#
+# 参考実装 (http3-rs) と同じブランチを使う。bindings.rs はこのブランチから
+# 生成したもので、ブランチを変更した場合は bindings.rs を再生成すること
+# (build.rs はブランチの最新コミットを取得するため、C 側だけが進むと
+#  構造体レイアウトが食い違う)。
+# 再生成: cargo build -p shiguredo_ngtcp2_sys --features overwrite
+ngtcp2 = { git = "https://github.com/ngtcp2/ngtcp2", branch = "reliable-stream-reset" }
+
+[lib]
+doctest = false
+path = "src/lib.rs"
+
+[dependencies]
+# TLS バックエンド (ssl feature で SSL / SSL_CTX を提供する)
+#
+# バージョンを固定する。ngtcp2 のビルドも同じ aws-lc をリンクするため、
+# 複数バージョンが解決されるとシンボルが衝突する。aws-lc-rs 1.18.1 が
+# 要求する aws-lc-sys 0.45 に固定する。
+aws-lc-sys = { version = "=0.45.0", features = ["ssl"] }
+# sockaddr / c_int などの C 型
+libc = "0.2"
+
+[build-dependencies]
+# overwrite feature でのみ使用する (通常ビルドでは libclang 不要)
+bindgen = { version = "0.72", optional = true }
+# ngtcp2 のビルドで使用する cmake の取得
+shiguredo_cmake = "4.4"
+# Cargo.toml からのメタデータ読み取り
+shiguredo_toml = "2026.2"
+
+[features]
+# bindings.rs を再生成するための feature
+# 通常は生成済みの bindings.rs を使用し、ngtcp2 のバージョンを上げたときに再生成する
+# 使用方法: cargo build -p shiguredo_ngtcp2_sys --features overwrite
+overwrite = ["dep:bindgen"]
+# ngtcp2 をソースからビルドする feature
+# 既定では GitHub Releases の prebuilt をダウンロードする。prebuilt を配布して
+# いないプラットフォームや、ngtcp2 のソースを変更してビルドする場合に使う
+source-build = []

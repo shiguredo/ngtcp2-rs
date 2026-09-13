@@ -1,0 +1,211 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  github-release:
+    name: "Create GitHub Release"
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.get_version.outputs.VERSION }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Get the version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_OUTPUT
+
+      # prebuilt はタグ名のリリースにアップロードされ、build.rs は
+      # CARGO_PKG_VERSION のリリースからダウンロードする。両者がずれると
+      # 利用者の `cargo build` が 404 で失敗するため、ここで検証する。
+      - name: Verify the tag matches the crate versions
+        run: |
+          TAG="${GITHUB_REF/refs\/tags\//}"
+          CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' ngtcp2-sys/Cargo.toml | head -1)
+          if [ "$TAG" != "$CARGO_VERSION" ]; then
+            echo "::error::tag $TAG does not match ngtcp2-sys version $CARGO_VERSION"
+            exit 1
+          fi
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ${{ contains(steps.get_version.outputs.VERSION, 'canary') }}; then
+            gh release create ${{ steps.get_version.outputs.VERSION }} \
+              --prerelease \
+              --title "${{ steps.get_version.outputs.VERSION }}" \
+              --notes "Release ${{ steps.get_version.outputs.VERSION }}"
+          else
+            gh release create ${{ steps.get_version.outputs.VERSION }} \
+              --title "${{ steps.get_version.outputs.VERSION }}" \
+              --notes "Release ${{ steps.get_version.outputs.VERSION }}"
+          fi
+
+  build-prebuilt:
+    name: "Build prebuilt (${{ matrix.target }})"
+    needs: github-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: ubuntu-22.04_x86_64
+            os: ubuntu-22.04
+          - target: ubuntu-22.04_arm64
+            os: ubuntu-22.04-arm
+          - target: ubuntu-24.04_x86_64
+            os: ubuntu-24.04
+          - target: ubuntu-24.04_arm64
+            os: ubuntu-24.04-arm
+          - target: ubuntu-26.04_x86_64
+            os: ubuntu-26.04
+          - target: ubuntu-26.04_arm64
+            os: ubuntu-26.04-arm
+          - target: macos_arm64
+            os: macos-26
+    runs-on: ${{ matrix.os }}
+    # ngtcp2 と aws-lc を C でビルドするため CI より長く取る
+    timeout-minutes: 60
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - run: rustup update stable
+
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ${{ matrix.os }}
+          toolchain: stable
+
+      - name: Build ngtcp2 from source
+        run: cargo build --release -p shiguredo_ngtcp2_sys --features source-build
+
+      # アーカイブのレイアウトは build.rs の download_prebuilt と一致させること
+      # (lib/libngtcp2.a, lib/libngtcp2_crypto_boringssl.a, include/ngtcp2/*.h)
+      - name: Create prebuilt archive
+        shell: bash
+        run: |
+          OUT_DIR=$(find target/release/build/shiguredo_ngtcp2_sys-*/out -maxdepth 0 -type d | head -1)
+          mkdir -p staging/lib staging/include
+          if [ -d "${OUT_DIR}/lib" ]; then
+            cp "${OUT_DIR}/lib/"libngtcp2*.a staging/lib/
+          else
+            cp "${OUT_DIR}/lib64/"libngtcp2*.a staging/lib/
+          fi
+          cp -R "${OUT_DIR}/include/." staging/include/
+          tar czf ngtcp2-${{ matrix.target }}.tar.gz -C staging .
+
+      - name: Generate SHA256 checksum
+        shell: bash
+        run: |
+          if command -v sha256sum &> /dev/null; then
+            sha256sum ngtcp2-${{ matrix.target }}.tar.gz > ngtcp2-${{ matrix.target }}.tar.gz.sha256
+          else
+            shasum -a 256 ngtcp2-${{ matrix.target }}.tar.gz > ngtcp2-${{ matrix.target }}.tar.gz.sha256
+          fi
+
+      - name: Upload prebuilt archive
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ needs.github-release.outputs.version }} \
+            ngtcp2-${{ matrix.target }}.tar.gz \
+            ngtcp2-${{ matrix.target }}.tar.gz.sha256 \
+            --clobber
+
+  # 利用者の既定の経路 (prebuilt のダウンロード) が壊れていないことを検証する。
+  # source-build を付けずにビルドとテストを実行する。
+  verify-prebuilt:
+    name: "Verify prebuilt (${{ matrix.target }})"
+    needs: [github-release, build-prebuilt]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: ubuntu-22.04_x86_64
+            os: ubuntu-22.04
+          - target: ubuntu-22.04_arm64
+            os: ubuntu-22.04-arm
+          - target: ubuntu-24.04_x86_64
+            os: ubuntu-24.04
+          - target: ubuntu-24.04_arm64
+            os: ubuntu-24.04-arm
+          - target: ubuntu-26.04_x86_64
+            os: ubuntu-26.04
+          - target: ubuntu-26.04_arm64
+            os: ubuntu-26.04-arm
+          - target: macos_arm64
+            os: macos-26
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - run: rustup update stable
+
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ${{ matrix.os }}
+          toolchain: stable
+
+      - name: Build and test with the prebuilt library
+        run: cargo test --workspace --tests
+
+  publish:
+    name: "Publish to crates.io"
+    needs: [github-release, build-prebuilt, verify-prebuilt]
+    timeout-minutes: 60
+    runs-on: macos-26
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+      # 3 クレートは依存グラフが一直線のため、上流から順に公開する。
+      # 公開したクレートが crates.io のインデックスに載るまで待つ。
+      - name: Publish shiguredo_ngtcp2_sys
+        run: cargo publish -p shiguredo_ngtcp2_sys
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Publish shiguredo_ngtcp2
+        run: |
+          sleep 60
+          cargo publish -p shiguredo_ngtcp2
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Publish shiguredo_ngtcp2_tokio
+        run: |
+          sleep 60
+          cargo publish -p shiguredo_ngtcp2_tokio
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  slack_notify:
+    needs: [github-release, build-prebuilt, verify-prebuilt, publish]
+    runs-on: ubuntu-slim
+    if: ${{ always() }}
+    permissions:
+      actions: read
+    steps:
+      - name: Slack Notification
+        uses: shiguredo/github-actions/.github/actions/slack-notify@main
+        with:
+          status: ${{ job.status }}
+          slack_channel: rust-oss
+          slack_webhook: ${{ secrets.SLACK_WEBHOOK }}
+          notify_mode: failure_and_fixed
+        env:
+          GH_TOKEN: ${{ github.token }}

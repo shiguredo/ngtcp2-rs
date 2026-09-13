@@ -1,0 +1,57 @@
+name: Interop
+
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+jobs:
+  interop:
+    name: Interop
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-26
+    runs-on: ${{ matrix.os }}
+    # quiche (BoringSSL) と s2n-quic (aws-lc) をビルドするため CI より長く取る
+    timeout-minutes: 60
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - run: rustup update stable
+
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ${{ matrix.os }}
+          toolchain: stable
+          # ルートの workspace とは別の target ディレクトリを使う
+          target-dir: interop/target
+
+      - name: Build quiche driver
+        run: cd interop && cargo build --workspace --bins
+
+      - name: Run interop tests
+        run: cd interop && cargo test
+
+  slack_notify:
+    needs: [interop]
+    runs-on: ubuntu-slim
+    if: ${{ always() }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Slack Notification
+        uses: shiguredo/github-actions/.github/actions/slack-notify@main
+        with:
+          status: ${{ job.status }}
+          slack_channel: rust-oss
+          slack_webhook: ${{ secrets.SLACK_WEBHOOK }}
+          notify_mode: failure_and_fixed
+        env:
+          GH_TOKEN: ${{ github.token }}

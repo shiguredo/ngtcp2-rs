@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: CI
+    strategy:
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-26
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - run: rustup update stable
+
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ${{ matrix.os }}
+          toolchain: stable
+
+      # このリポジトリは libc::sockaddr_storage など POSIX ソケット型に依存するため
+      # Windows は対象外。対応プラットフォームは README を参照。
+      #
+      # ngtcp2 は既定で GitHub Releases の prebuilt をダウンロードするが、
+      # 開発中のバージョンにはリリースが無いため source-build でビルドする。
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --features source-build -- -D warnings
+      - run: cargo test --workspace --tests --features source-build
+
+  slack_notify:
+    needs: [ci]
+    runs-on: ubuntu-slim
+    if: ${{ always() }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Slack Notification
+        uses: shiguredo/github-actions/.github/actions/slack-notify@main
+        with:
+          status: ${{ job.status }}
+          slack_channel: rust-oss
+          slack_webhook: ${{ secrets.SLACK_WEBHOOK }}
+          notify_mode: failure_and_fixed
+        env:
+          GH_TOKEN: ${{ github.token }}

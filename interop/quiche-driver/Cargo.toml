@@ -1,0 +1,39 @@
+[package]
+name = "shiguredo_ngtcp2_quiche_driver"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# 相互運用テストから子プロセスとして起動する quiche のクライアント / サーバー。
+#
+# このパッケージは quiche 系だけに依存する。ngtcp2 系 (aws-lc) に依存すると
+# 同一バイナリに BoringSSL と aws-lc がリンクされ、`SSL_CTX_new` などの
+# unprefixed なシンボルが衝突してどちらか一方の実装が使われてしまう。
+# そのため親のパッケージ (shiguredo_ngtcp2_interop) とは別のパッケージにしている。
+
+[[bin]]
+name = "quiche_driver"
+path = "src/bin/quiche_driver.rs"
+
+[dependencies]
+# クライアントで CA 証明書を読み込む SSL_CTX を作る
+#
+# tokio-quiche の設定には CA 証明書を指定する項目が無いため、フック
+# (ConnectionHook) で BoringSSL の SSL_CTX を自前で作る。
+boring = "4"
+# SCID とリセットトークンの生成に使う乱数
+#
+# aws-lc-rs (aws-lc-sys) は使えない。リンクすると BoringSSL と unprefixed な
+# シンボルが衝突し、どちらか一方の実装が使われてしまうため。
+getrandom = "0.3"
+# quiche (Cloudflare)。BoringSSL をビルドして静的リンクする
+#
+# 生 quiche は tokio-quiche で表現できない 0-RTT の送信とマイグレーションに
+# 使う。tokio-quiche も同じ quiche に依存するため、ビルドは 1 回で済む。
+quiche = "0.29"
+# 非同期ランタイム
+tokio = { version = "1.53", features = ["full"] }
+# quiche の tokio 統合。通常のクライアントとサーバーに使う
+tokio-quiche = "0.19"
+# 接続を受け入れるストリームの操作
+tokio-stream = "0.1"

@@ -1,0 +1,106 @@
+[package]
+name = "shiguredo_ngtcp2_tokio"
+version = "2026.1.0-canary.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Tokio async I/O integration for ngtcp2"
+readme = "README.md"
+homepage = "https://github.com/shiguredo/ngtcp2-rs"
+repository = "https://github.com/shiguredo/ngtcp2-rs"
+license = "Apache-2.0"
+# ルートの LICENSE / README.md はクレート tarball に入らないため、
+# クレート直下に実ファイルを置いて個別に指定する。
+# tests/ は tarball に含める (cargo package の対象になり、公開物の検証に使える)。
+include = ["/LICENSE", "/README.md", "/src/**", "/tests/**"]
+
+[lib]
+path = "src/lib.rs"
+
+# テストターゲットを明示する
+#
+# tests/e2e/ 配下のテストは auto-discovery では目的の名前にならないため、
+# `make test` や CI から個別に指定できるよう明示的に宣言する。
+# tests/helpers/ と tests/interop/ はテストターゲットではないため宣言しない。
+[[test]]
+name = "test_config"
+path = "tests/test_config.rs"
+
+[[test]]
+name = "e2e_handshake"
+path = "tests/e2e/handshake.rs"
+
+[[test]]
+name = "e2e_stream"
+path = "tests/e2e/stream.rs"
+
+[[test]]
+name = "e2e_stream_lifecycle"
+path = "tests/e2e/stream_lifecycle.rs"
+
+[[test]]
+name = "e2e_version_negotiation"
+path = "tests/e2e/version_negotiation.rs"
+
+[[test]]
+name = "e2e_stateless_reset"
+path = "tests/e2e/stateless_reset.rs"
+
+[[test]]
+name = "e2e_retry"
+path = "tests/e2e/retry.rs"
+
+[[test]]
+name = "e2e_migration"
+path = "tests/e2e/migration.rs"
+
+[[test]]
+name = "e2e_datagram"
+path = "tests/e2e/datagram.rs"
+
+[[test]]
+name = "e2e_certificate_verification"
+path = "tests/e2e/certificate_verification.rs"
+
+[[test]]
+name = "e2e_server_robustness"
+path = "tests/e2e/server_robustness.rs"
+
+[[test]]
+name = "e2e_early_data"
+path = "tests/e2e/early_data.rs"
+
+[[test]]
+name = "e2e_new_token"
+path = "tests/e2e/new_token.rs"
+
+[[test]]
+name = "e2e_qlog"
+path = "tests/e2e/qlog.rs"
+
+[[test]]
+name = "e2e_preferred_address"
+path = "tests/e2e/preferred_address.rs"
+
+[[test]]
+name = "e2e_zero_length_cid"
+path = "tests/e2e/zero_length_cid.rs"
+
+[dependencies]
+# C 型 (sockaddr / ECN の補助データ)
+libc = "0.2"
+# sans-IO な QUIC コア
+shiguredo_ngtcp2.workspace = true
+# 非同期ランタイム
+tokio = { version = "1.53", features = ["full"] }
+
+[dev-dependencies]
+# テスト用の自己署名証明書生成
+rcgen = "0.14"
+# 証明書検証テストの直列化
+serial_test = "4.0"
+
+[features]
+# ngtcp2 をソースからビルドする (既定は GitHub Releases の prebuilt)
+#
+# 依存するクレートからも有効にできるよう feature を転送する。
+source-build = ["shiguredo_ngtcp2/source-build"]

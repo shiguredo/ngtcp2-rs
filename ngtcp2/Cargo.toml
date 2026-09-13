@@ -1,0 +1,43 @@
+[package]
+name = "shiguredo_ngtcp2"
+version = "2026.1.0-canary.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Sans I/O QUIC protocol library built on ngtcp2"
+readme = "README.md"
+homepage = "https://github.com/shiguredo/ngtcp2-rs"
+repository = "https://github.com/shiguredo/ngtcp2-rs"
+license = "Apache-2.0"
+# ルートの LICENSE / README.md はクレート tarball に入らないため、
+# クレート直下に実ファイルを置いて個別に指定する。
+# tests/ は tarball に含める (cargo package の対象になり、公開物の検証に使える)。
+include = ["/LICENSE", "/README.md", "/src/**", "/tests/**"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# 乱数生成 (ngtcp2 の rand / get_new_connection_id コールバック)
+#
+# aws-lc-sys を 1 バージョンに固定するため、aws-lc-rs のバージョンを明示する。
+# aws-lc-rs は aws-lc-sys 0.45 を要求する 1.18.1 に固定する。
+# 同一プロセスに 2 つの aws-lc がリンクされるとシンボルが衝突するため、
+# 固定が必要。
+aws-lc-rs = "=1.18.1"
+# C 型 (c_int / sockaddr_storage)
+libc = "0.2"
+# ngtcp2 の FFI バインディング (aws-lc-sys の再公開も含む)
+shiguredo_ngtcp2_sys.workspace = true
+
+[dev-dependencies]
+# テスト用の自己署名証明書生成
+rcgen = "0.14"
+# sans-IO テストで実 UDP ソケットを駆動するために使用する
+# (本体は tokio に依存しない)
+tokio = { version = "1.53", features = ["macros", "net", "rt", "time"] }
+
+[features]
+# ngtcp2 をソースからビルドする (既定は GitHub Releases の prebuilt)
+#
+# 依存するクレートからも有効にできるよう feature を転送する。
+source-build = ["shiguredo_ngtcp2_sys/source-build"]

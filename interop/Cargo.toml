@@ -1,0 +1,52 @@
+[package]
+name = "shiguredo_ngtcp2_interop"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# 独立したワークスペースとして扱う。
+#
+# quiche は BoringSSL、s2n-quic は aws-lc をそれぞれ C/C++ でビルドするため、
+# ルートの workspace に入れると通常の `cargo test` に依存とビルド時間が乗る。
+# ルートの Cargo.toml からは exclude している。
+#
+# quiche を動かす子プロセス (quiche-driver) は、このパッケージに依存すると
+# BoringSSL と aws-lc が同一バイナリにリンクされてしまうため別パッケージにしている。
+[workspace]
+members = ["quiche-driver"]
+
+[lib]
+name = "shiguredo_ngtcp2_interop"
+path = "src/lib.rs"
+
+[dependencies]
+# aws-lc-rs を ngtcp2-sys と同じバージョンに固定する
+#
+# 2 つの aws-lc-sys が同一バイナリにリンクされるとシンボルが衝突するため。
+aws-lc-rs = "=1.18.1"
+bytes = "1"
+# テスト用の証明書生成
+#
+# テストバイナリから使うヘルパー (TestCert) がこのクレートの lib にあるため、
+# dev-dependencies ではなく dependencies に置く。
+rcgen = "0.14"
+# s2n-quic (AWS)。TLS は rustls + aws-lc-rs を使う
+#
+# s2n-tls を使う既定の provider ではなく rustls を使う。s2n-tls の C ライブラリを
+# ビルドすると aws-lc がもう 1 つ増え、ngtcp2-sys がリンクする aws-lc と
+# シンボルが衝突するため。
+s2n-quic = {
+  version = "1.88",
+  default-features = false,
+  features = [
+    "provider-address-token-default",
+    "provider-tls-rustls",
+  ]
+}
+# 検証対象の実装
+#
+# 相互運用テストは ngtcp2 をソースからビルドする。prebuilt はリリース済みの
+# バージョンにしか存在せず、開発中のバージョンでは取得できないため。
+shiguredo_ngtcp2 = { path = "../ngtcp2", features = ["source-build"] }
+shiguredo_ngtcp2_tokio = { path = "../tokio-ngtcp2", features = ["source-build"] }
+tokio = { version = "1.53", features = ["full"] }

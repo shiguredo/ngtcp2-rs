@@ -1,0 +1,145 @@
+# Configuration file for `prek`, a git hook framework written in Rust.
+# See https://prek.j178.dev for more information.
+#:schema https://www.schemastore.org/prek.json
+
+# 最初に失敗したフックで残りをスキップする
+fail_fast = true
+# stages 未指定のフックは pre-commit でだけ実行される
+default_stages = ["pre-commit"]
+# prek install で pre-commit と pre-push の両方の Git フックを入れる
+default_install_hook_types = ["pre-commit", "pre-push"]
+# interop と fuzz は独立した workspace のため target ディレクトリも別にある
+exclude = { glob = ["target/**", "interop/target/**", "fuzz/target/**"] }
+
+# prek 組み込みフック (オフラインで動作する Rust ネイティブ実装)
+[[repos]]
+repo = "builtin"
+hooks = [
+  # 行末の空白を取り除く
+  { id = "trailing-whitespace" },
+  # ファイル末尾を改行 1 つで終わらせる
+  { id = "end-of-file-fixer" },
+  # ファイル先頭の UTF-8 BOM を取り除く
+  { id = "fix-byte-order-marker" },
+  # TOML の構文エラーを検出する
+  { id = "check-toml" },
+  # YAML の構文エラーを検出する
+  { id = "check-yaml" },
+  # JSON の構文エラーと重複キーを検出する (markdownlint 設定は JSONC のため対象外)
+  { id = "check-json" },
+  # マージコンフリクトマーカーが残ったコミットを防ぐ
+  { id = "check-merge-conflict" },
+  # 大文字小文字だけが異なるファイル名の衝突を防ぐ
+  { id = "check-case-conflict" },
+  # Windows で使えないファイル名の混入を防ぐ
+  { id = "check-illegal-windows-names" },
+  # 大きなファイルの誤コミットを防ぐ (bindgen 生成の bindings.rs は約 300 KB あるため上限を上げる)
+  { id = "check-added-large-files", args = ["--maxkb=1024"] },
+  # 秘密鍵の誤コミットを防ぐ
+  { id = "detect-private-key" },
+  # 改行コードの混在を防ぐ
+  { id = "mixed-line-ending" },
+  # リンク切れのシンボリックリンクを検出する (CLAUDE.md -> AGENTS.md を検証する)
+  { id = "check-symlinks" },
+  # シンボリックリンクだったファイルが実体ファイルとしてコミットされるのを検出する
+  { id = "destroyed-symlinks" },
+  # 実行権限のあるファイルに shebang があるか確認する
+  { id = "check-executables-have-shebangs" },
+  # shebang 付きスクリプトに実行権限があるか確認する
+  # Rust の inner attribute #![...] が shebang と誤判定されるため Rust ファイルは除外する
+  { id = "check-shebang-scripts-are-executable", exclude_types = ["rust"] },
+]
+
+# tombi: TOML のフォーマッタ・リンタ
+# rev は prek auto-update で更新する
+[[repos]]
+repo = "https://github.com/tombi-toml/tombi-pre-commit"
+rev = "v1.5.5"
+hooks = [
+  # Cargo.lock は自動生成ファイルなので tombi の対象外にする
+  { id = "tombi-lint", exclude = { glob = "**/Cargo.lock" } },
+  { id = "tombi-format", exclude = { glob = "**/Cargo.lock" } },
+]
+
+# プロジェクト固有のローカルフック
+# priority が小さいほど先に実行される。同じ priority なら並列実行される
+[[repos]]
+repo = "local"
+
+# --all でワークスペース全体を対象にし、--check で書き換えずに未フォーマットを検出だけする
+[[repos.hooks]]
+id = "cargo-fmt"
+name = "cargo fmt"
+entry = "cargo fmt --all -- --check"
+language = "system"
+types = ["rust"]
+pass_filenames = false
+priority = 0
+
+# interop は独立した workspace のため --manifest-path で別に指定する
+[[repos.hooks]]
+id = "interop-cargo-fmt"
+name = "interop cargo fmt"
+entry = "cargo fmt --manifest-path interop/Cargo.toml --all -- --check"
+language = "system"
+types = ["rust"]
+pass_filenames = false
+priority = 1
+
+# fuzz も独立した workspace のため --manifest-path で別に指定する
+#
+# fuzz の clippy と fuzz ターゲットの実行は Fuzzing ワークフロー (fuzzing.yml)
+# が担当する。
+[[repos.hooks]]
+id = "fuzz-cargo-fmt"
+name = "fuzz cargo fmt"
+entry = "cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check"
+language = "system"
+types = ["rust"]
+pass_filenames = false
+priority = 2
+
+# --workspace --all-targets でテスト・example・ベンチも lint し、
+# -D warnings で警告をエラーに昇格する
+#
+# --features source-build を付けて ngtcp2 をソースからビルドする。既定は
+# prebuilt のダウンロードだが、開発中のバージョンにはリリースが無いため。
+[[repos.hooks]]
+id = "cargo-clippy"
+name = "cargo clippy"
+entry = "cargo clippy --workspace --all-targets --features source-build -- -D warnings"
+language = "system"
+types = ["rust"]
+pass_filenames = false
+priority = 10
+
+# cargo test: コミットを遅くしないため pre-push でだけ実行する
+#
+# --tests を付けて doctest を除外する。shiguredo_ngtcp2_sys の bindings.rs には
+# bindgen が C ヘッダーのコメントから生成した doc コメントが含まれ、
+# その中の Rust 風のサンプルが rustc でパースできず doctest が失敗するため。
+#
+[[repos.hooks]]
+id = "cargo-test"
+name = "cargo test"
+entry = "cargo test --workspace --tests --features source-build"
+language = "system"
+types = ["rust"]
+pass_filenames = false
+stages = ["pre-push"]
+priority = 20
+
+# interop は quiche (BoringSSL) と s2n-quic のビルドを含むため初回は数分かかる。
+# quiche を動かすドライバは別パッケージのバイナリなので先にビルドする。
+# interop の clippy はここでは実行しない (CI の interop.yml が担当する)。
+#
+# entry はシェルを介して実行されないため、複数のコマンドは sh -c でまとめる。
+[[repos.hooks]]
+id = "interop-cargo-test"
+name = "interop cargo test"
+entry = "sh -c 'cd interop && cargo build --workspace --bins && cargo test'"
+language = "system"
+types = ["rust"]
+pass_filenames = false
+stages = ["pre-push"]
+priority = 21
