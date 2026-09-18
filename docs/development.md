@@ -90,3 +90,30 @@ cargo clean -p shiguredo_ngtcp2_sys
 cargo clean --manifest-path fuzz/Cargo.toml -p shiguredo_ngtcp2_sys
 cargo clean --manifest-path interop/Cargo.toml -p shiguredo_ngtcp2_sys
 ```
+
+## リリース
+
+3 クレートは同じバージョンで同時にリリースします。バージョンの更新からコミット・タグ・プッシュまでは `canary.py` が行います。
+
+`develop` または `release/` ブランチで、作業ツリーがクリーンなときだけ実行できます。
+
+### canary リリース
+
+```bash
+python3 canary.py
+```
+
+- バージョンは `2026.0.0` → `2026.1.0-canary.0` のように、RELEASE を 1 つ上げた canary バージョンに更新されます (canary を重ねるときは `2026.1.0-canary.0` → `2026.1.0-canary.1` のように番号だけが進みます)
+- `ngtcp2` / `ngtcp2-sys` / `tokio-ngtcp2` の `Cargo.toml`、ルートの `[workspace.dependencies]`、3 つの lockfile (`Cargo.lock` / `fuzz/Cargo.lock` / `interop/Cargo.lock`) をまとめて更新します
+- タグのプッシュにより、[release.yml](../.github/workflows/release.yml) が GitHub Release の作成、prebuilt のビルド、crates.io への公開まで実行します
+
+### 正式リリース
+
+```bash
+python3 canary.py --release
+```
+
+- バージョンは `2026.1.0-canary.1` → `2026.1.0` のように変換されます
+- `CHANGES.md` の `## develop` が `## 2026.1.0` とリリース日に更新されます
+
+どちらも `--dry-run` を付けると、ファイルを書き換えずに実行内容だけを確認できます。
