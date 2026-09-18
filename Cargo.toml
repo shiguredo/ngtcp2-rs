@@ -16,8 +16,8 @@ edition = "2024"
 rust-version = "1.93"
 
 [workspace.dependencies]
-shiguredo_ngtcp2 = { path = "ngtcp2", version = "=2026.1.0-canary.0" }
-shiguredo_ngtcp2_sys = { path = "ngtcp2-sys", version = "=2026.1.0-canary.0" }
+shiguredo_ngtcp2 = { path = "ngtcp2", version = "=2026.0.0" }
+shiguredo_ngtcp2_sys = { path = "ngtcp2-sys", version = "=2026.0.0" }
 
 # 3 クレートは常に同時にリリースする。バージョンを揃えておくことで、
 # 公開時に path 依存が crates.io の該当バージョンへ解決される
