@@ -1,6 +1,6 @@
 [package]
 name = "shiguredo_ngtcp2_sys"
-version = "2026.0.0"
+version = "2026.1.0-canary.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "FFI bindings for the ngtcp2 QUIC library"
