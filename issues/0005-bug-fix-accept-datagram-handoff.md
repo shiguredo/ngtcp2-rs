@@ -1,7 +1,7 @@
 # accept 済み接続宛てのデータグラムを接続へ引き渡す
 
 - Created: 2026-09-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-21
 - Branch: feature/fix-accept-datagram-handoff
 - Polished: {YYYY-MM-DD}
 
@@ -33,6 +33,8 @@
 
 ## 解決方法
 
+ソケットを読んだ側が、自分のものではないデータグラムを所有者へ引き渡すようにした。`Server` と接続ハンドルで経路表と受信キュー (`SharedRoutes`) を共有し、どちらのリーダーも既知の接続宛てデータグラムを破棄しない。
+
 ### 関連ファイル
 
 - `tokio-ngtcp2/src/server.rs`
@@ -44,3 +46,10 @@
   - `AcceptedConnection::sync_routes` で発行 / 退役した CID を共有表へ反映し、`Drop` で経路を除去する
 - `tokio-ngtcp2/tests/e2e/accept_handoff.rs` と `tokio-ngtcp2/Cargo.toml`
   - accept を回したあとに接続を駆動したとき、クライアントの再送なしで全量が届くことを確認する回帰テストを追加する
+
+### 検証
+
+- 回帰テストは修正前の実装で 3 回中 3 回失敗し (クライアントのパケット喪失が 4 件)、修正後は 3 回中 3 回成功した
+- `cargo test --workspace --tests` と `cargo test --workspace --tests --features source-build` が 25 テストターゲットすべて成功した
+- `cargo fmt --all -- --check` と `cargo clippy --workspace --all-targets -- -D warnings` が成功した
+- http3-rs の interop テストで、http3-rs 側の回避策を外した状態でも s2n クライアント → ngtcp2 サーバーが 10 回連続、ngtcp2 クライアント → s2n サーバーが 5 回連続で成功した (本修正をローカル patch して検証)
