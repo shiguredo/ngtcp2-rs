@@ -26,6 +26,10 @@ name = "test_config"
 path = "tests/test_config.rs"
 
 [[test]]
+name = "e2e_accept_handoff"
+path = "tests/e2e/accept_handoff.rs"
+
+[[test]]
 name = "e2e_handshake"
 path = "tests/e2e/handshake.rs"
 

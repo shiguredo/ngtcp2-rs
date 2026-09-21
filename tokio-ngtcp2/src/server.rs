@@ -3,8 +3,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use tokio::sync::mpsc;
 
 use shiguredo_ngtcp2::{
     AcceptedInitial, AddressValidationToken, AddressValidationTokenKind, ConnStats, Connection,
@@ -563,6 +565,13 @@ pub struct AcceptedConnection {
     inner: ServerConnection,
     // 優先アドレスのソケット用の受信バッファ
     alt_recv_buf: Vec<u8>,
+    // accept 済み接続の振り分け表 (Server と共有する)
+    //
+    // ソケットを読んだ側が自分のものではないと判断したデータグラムを、
+    // 所有者 (この接続または別の accept 済み接続) へ引き渡すために使う。
+    routes: Arc<Mutex<SharedRoutes>>,
+    // `Server::accept` が読んだデータグラムの受信キュー
+    inbound_rx: mpsc::Receiver<InboundDatagram>,
 }
 
 impl AcceptedConnection {
@@ -782,6 +791,8 @@ impl AcceptedConnection {
         let ts = timestamp();
         let packets = flush_to_packets(&mut self.inner, ts)?;
         self.sockets.send_packets(&packets).await;
+        // 送信で CID が発行されることがある (NEW_CONNECTION_ID)
+        self.sync_routes();
         Ok(())
     }
 
@@ -806,6 +817,8 @@ impl AcceptedConnection {
             return Err(Error::ConnectionClosed);
         }
 
+        // `Server` が drop されて受信キューが閉じた場合に select から外すためのフラグ
+        let mut queue_open = true;
         loop {
             if let Some(event) = self.poll_event() {
                 return Ok(event);
@@ -826,6 +839,7 @@ impl AcceptedConnection {
             self.flush().await?;
             // 送信側でもコールバックが発生する (MAX_STREAMS の送信など)
             drain_events(&mut self.inner);
+            self.sync_routes();
 
             if let Some(event) = self.poll_event() {
                 return Ok(event);
@@ -840,6 +854,27 @@ impl AcceptedConnection {
             };
 
             tokio::select! {
+                // `Server::accept` が読んで引き渡したデータグラム。
+                // accept を回しながら接続を駆動する使い方ではこちらに届く。
+                datagram = self.inbound_rx.recv(), if queue_open => {
+                    match datagram {
+                        Some(datagram) => {
+                            let ts = timestamp();
+                            handle_datagram(
+                                &mut self.inner,
+                                datagram.local_addr,
+                                datagram.from,
+                                &datagram.data,
+                                ts,
+                                datagram.ecn,
+                            )?;
+                            self.sync_routes();
+                        }
+                        // 受信キューが閉じた (Server が drop された) 場合は
+                        // select から外し、ソケットの読み取りだけを続ける
+                        None => queue_open = false,
+                    }
+                }
                 result = self.sockets.recv_from(&mut self.inner.recv_buf, &mut self.alt_recv_buf) => {
                     match result {
                         Ok((data, from, local, ecn)) => {
@@ -847,8 +882,7 @@ impl AcceptedConnection {
                             // 経路の変更を検出して経路検証を始める
                             // (RFC 9000 Section 9.3)。接続に関係のないパケットは
                             // ngtcp2 が復号に失敗して破棄する。
-                            let ts = timestamp();
-                            handle_datagram(&mut self.inner, local, from, &data, ts, ecn)?;
+                            self.handle_received_datagram(data, from, local, ecn)?;
                         }
                         Err(e) => {
                             return Err(Error::Internal(format!("recv error: {e}")));
@@ -876,6 +910,64 @@ impl AcceptedConnection {
                 }
             }
         }
+    }
+
+    /// ソケットから読んだデータグラムを処理する
+    ///
+    /// 自分の接続宛て (または経路表で解決できない場合) は ngtcp2 へ渡す。
+    /// 別の accept 済み接続宛てだった場合は、その接続へ引き渡す。ソケットは
+    /// 全接続で共有しているため、他の接続宛てのデータグラムを読むことがある。
+    fn handle_received_datagram(
+        &mut self,
+        data: Vec<u8>,
+        from: SocketAddr,
+        local_addr: SocketAddr,
+        ecn: u8,
+    ) -> Result<()> {
+        {
+            let mut routes = self
+                .routes
+                .lock()
+                .expect("routes mutex must not be poisoned");
+            if let Some(conn_key) = routes.resolve(&data, &from)
+                && conn_key != self.connection_id
+            {
+                let datagram = InboundDatagram {
+                    data,
+                    from,
+                    local_addr,
+                    ecn,
+                };
+                if !routes.deliver(&conn_key, datagram) {
+                    // 受信側が既に drop されている
+                    routes.remove(&conn_key);
+                }
+                return Ok(());
+            }
+        }
+
+        let ts = timestamp();
+        handle_datagram(&mut self.inner, local_addr, from, &data, ts, ecn)?;
+        self.sync_routes();
+        Ok(())
+    }
+
+    /// 発行・退役した CID を共有経路表へ反映する
+    ///
+    /// 反映しないと、`Server::accept` が読んだ新しい CID 宛てのパケットを
+    /// この接続へ引き渡せず、未知 DCID として破棄される。
+    fn sync_routes(&mut self) {
+        let issued = self.inner.conn.poll_issued_cids();
+        let retired = self.inner.conn.poll_retired_cids();
+        if issued.is_empty() && retired.is_empty() {
+            return;
+        }
+        let mut routes = self
+            .routes
+            .lock()
+            .expect("routes mutex must not be poisoned");
+        routes.register_issued_cids(&self.connection_id, &issued);
+        routes.retire_cids(&self.connection_id, &retired);
     }
 
     /// ストリームのフロー制御クレジットを進める (RFC 9000 Section 19.9)
@@ -1039,6 +1131,167 @@ impl AcceptedConnection {
     }
 }
 
+impl Drop for AcceptedConnection {
+    fn drop(&mut self) {
+        // 経路と受信キューを経路表から除去する。除去しないと、以降に届いた
+        // この接続宛てのパケットを存在しない接続へ引き渡し続けてしまう。
+        // 引き渡し済み CID は残す (遅れて届いたパケットに Stateless Reset を
+        // 返さないため)。
+        self.routes
+            .lock()
+            .expect("routes mutex must not be poisoned")
+            .remove(&self.connection_id);
+    }
+}
+
+/// 引き渡し先の接続へ渡すデータグラム
+///
+/// ソケットを読んだ側が自分のものではないと判断したデータグラムを、所有者へ
+/// 渡すために使う。
+struct InboundDatagram {
+    /// データグラム本体
+    data: Vec<u8>,
+    /// 送信元アドレス
+    from: SocketAddr,
+    /// 受信したローカルアドレス (優先アドレスのソケット用)
+    local_addr: SocketAddr,
+    /// ECN コードポイント (RFC 3168 Section 5)
+    ecn: u8,
+}
+
+/// 接続ごとに溜められる引き渡しデータグラム数の上限
+///
+/// アプリケーションが接続を駆動しないまま `Server::accept` だけを呼び続けた
+/// 場合にキューが無制限に伸びるのを防ぐ。あふれた分は捨てるが、QUIC はロスを
+/// 再送で回復するため接続は壊れない。
+const MAX_QUEUED_DATAGRAMS: usize = 512;
+
+/// `Server` と [`AcceptedConnection`] で共有する振り分け表
+///
+/// `Server` はハンドシェイク中の接続を、[`AcceptedConnection`] は accept 済み
+/// 接続を所有する。両者が同じ UDP ソケットを読むため、どちらが読んだ
+/// データグラムでも所有者へ届くように、accept 済み接続の経路と受信キューを
+/// ここへ集約する。これが無いと、`Server::accept` が既に引き渡した接続宛ての
+/// データグラムを読み捨ててしまい、その接続の転送が再送タイムアウトまで
+/// 止まる。
+///
+/// `Server` と接続ハンドルは別タスクで動くことがあるため `Mutex` で保護する。
+/// ロック中に await しない (待たない `try_send` だけ) ため、ロック保持時間は
+/// 短く、非同期タスク間でも安全に使える。
+struct SharedRoutes {
+    /// DCID -> 接続キー (RFC 9000 Section 5.2)
+    cid_map: HashMap<ConnectionId, ConnectionId>,
+    /// ピアアドレス -> 接続キー (長さ 0 のコネクション ID 用)
+    addr_map: HashMap<SocketAddr, ConnectionId>,
+    /// Short header パケットの DCID 照合に使う長さの集合
+    short_cid_lengths: BTreeSet<usize>,
+    /// 接続キー -> 受信キュー
+    senders: HashMap<ConnectionId, mpsc::Sender<InboundDatagram>>,
+    /// 経路表から外れた CID (Stateless Reset の抑止に使う)
+    taken_cids: HashSet<ConnectionId>,
+    /// taken_cids の挿入順。上限を超えたときに古いものから忘れる
+    taken_cid_order: VecDeque<ConnectionId>,
+}
+
+impl SharedRoutes {
+    /// データグラムの所有者を解決する
+    ///
+    /// 解決できない場合は `None` を返す。呼び出し側は自分宛てとして扱うか、
+    /// 新規接続として扱うかを判断する。
+    fn resolve(&self, data: &[u8], from: &SocketAddr) -> Option<ConnectionId> {
+        resolve_dcid(&self.cid_map, &self.short_cid_lengths, data)
+            .or_else(|| self.addr_map.get(from).cloned())
+    }
+
+    /// accept 済み接続の経路と受信キューを登録する
+    fn register(
+        &mut self,
+        conn_key: &ConnectionId,
+        sender: mpsc::Sender<InboundDatagram>,
+        cids: &[ConnectionId],
+        addrs: &[SocketAddr],
+    ) {
+        for cid in cids {
+            self.short_cid_lengths.insert(cid.len());
+            self.cid_map.insert(cid.clone(), conn_key.clone());
+        }
+        for addr in addrs {
+            self.addr_map.insert(*addr, conn_key.clone());
+        }
+        self.senders.insert(conn_key.clone(), sender);
+    }
+
+    /// 接続が発行した CID を登録する
+    ///
+    /// ngtcp2 は `get_new_connection_id` コールバックで CID を発行する。ピアは
+    /// 発行された CID をすぐに DCID として使い始めるため、登録しないと
+    /// `Server::accept` が読んだパケットを接続へ引き渡せない。
+    fn register_issued_cids(&mut self, conn_key: &ConnectionId, cids: &[ConnectionId]) {
+        for cid in cids {
+            self.short_cid_lengths.insert(cid.len());
+            self.cid_map.insert(cid.clone(), conn_key.clone());
+        }
+    }
+
+    /// ピアが使用を終了した CID を取り除く (RFC 9000 Section 5.1.2)
+    ///
+    /// 取り除いた CID は引き渡し済みとして記録する。遅れて届いたパケットに
+    /// Stateless Reset を返すと、まだ接続が生きているピアの接続を切ってしまう
+    /// ため (RFC 9000 Section 10.3)。
+    fn retire_cids(&mut self, conn_key: &ConnectionId, cids: &[ConnectionId]) {
+        for cid in cids {
+            if self.cid_map.get(cid) == Some(conn_key) {
+                self.cid_map.remove(cid);
+            }
+            self.remember_taken_cid(cid.clone());
+        }
+    }
+
+    /// データグラムを接続へ引き渡す
+    ///
+    /// 戻り値は経路が有効かどうか。受信側が既に drop されている場合は `false`
+    /// を返し、呼び出し側が経路表から除去する。キューが満杯の場合は
+    /// データグラムを捨てて `true` を返す (`MAX_QUEUED_DATAGRAMS` を参照)。
+    fn deliver(&mut self, conn_key: &ConnectionId, datagram: InboundDatagram) -> bool {
+        let Some(sender) = self.senders.get(conn_key) else {
+            return false;
+        };
+        match sender.try_send(datagram) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    }
+
+    /// 接続の経路と受信キューを除去する
+    fn remove(&mut self, conn_key: &ConnectionId) {
+        self.cid_map.retain(|_, key| key != conn_key);
+        self.addr_map.retain(|_, key| key != conn_key);
+        self.senders.remove(conn_key);
+    }
+
+    /// 引き渡し済みの CID を記録する
+    ///
+    /// 上限を超えたら最も古いものから忘れる。
+    fn remember_taken_cid(&mut self, cid: ConnectionId) {
+        if self.taken_cids.insert(cid.clone()) {
+            self.taken_cid_order.push_back(cid);
+        }
+        while self.taken_cid_order.len() > MAX_TAKEN_CIDS {
+            // pop_front は len > MAX_TAKEN_CIDS >= 1 の間だけ呼ぶため必ず Some
+            let oldest = self
+                .taken_cid_order
+                .pop_front()
+                .expect("taken_cid_order is not empty");
+            self.taken_cids.remove(&oldest);
+        }
+    }
+
+    /// 引き渡し済みの CID かどうかを返す
+    fn is_taken_cid(&self, cid: &ConnectionId) -> bool {
+        self.taken_cids.contains(cid)
+    }
+}
+
 /// QUIC サーバー
 pub struct Server {
     sockets: Arc<ServerSockets>,
@@ -1070,6 +1323,11 @@ pub struct Server {
     taken_cids: HashSet<ConnectionId>,
     // taken_cids の挿入順。上限を超えたときに古いものから忘れる
     taken_cid_order: VecDeque<ConnectionId>,
+    // accept 済み接続の振り分け表 (接続ハンドルと共有する)
+    //
+    // `Server::accept` が読んだデータグラムのうち accept 済み接続宛てのものを
+    // その接続へ引き渡すために使う。
+    routes: Arc<Mutex<SharedRoutes>>,
     // 受信バッファ
     recv_buf: Vec<u8>,
     // 優先アドレスのソケット用の受信バッファ
@@ -1148,6 +1406,14 @@ impl Server {
             stateless_reset_limiter: StatelessResetLimiter::new(),
             taken_cids: HashSet::new(),
             taken_cid_order: VecDeque::new(),
+            routes: Arc::new(Mutex::new(SharedRoutes {
+                cid_map: HashMap::new(),
+                addr_map: HashMap::new(),
+                short_cid_lengths: BTreeSet::new(),
+                senders: HashMap::new(),
+                taken_cids: HashSet::new(),
+                taken_cid_order: VecDeque::new(),
+            })),
             recv_buf: vec![0u8; RECV_BUFFER_SIZE],
             alt_recv_buf: if preferred {
                 vec![0u8; RECV_BUFFER_SIZE]
@@ -1258,6 +1524,9 @@ impl Server {
                 self.handle_existing_connection(&key, data, from, local_addr, ts, ecn)
                     .await
             }
+            None if self.handoff_to_accepted(data, &from, local_addr, ecn) => {
+                // accept 済み接続へ引き渡した。以降の処理はその接続が行う
+            }
             None if data.first().is_some_and(|first| first & 0x80 != 0) => {
                 // Long header の未知 DCID は新規接続として扱う。
                 // Initial 以外の Long header は parse_new_connection_packet が破棄する
@@ -1271,6 +1540,40 @@ impl Server {
                 self.send_stateless_reset(data, from, local_addr, ts).await;
             }
         }
+    }
+
+    /// accept 済み接続宛てのデータグラムをその接続へ引き渡す
+    ///
+    /// 戻り値は「accept 済み接続宛てだったか」。宛て先が既に drop されている
+    /// 場合とキューが満杯の場合はデータグラムを捨てる。ここで捨てずに未知 DCID の
+    /// パケットとして扱うと、accept 済みの接続がまだ生きているのに Stateless
+    /// Reset を返したり、新規接続として処理したりしてしまう。
+    fn handoff_to_accepted(
+        &mut self,
+        data: &[u8],
+        from: &SocketAddr,
+        local_addr: SocketAddr,
+        ecn: u8,
+    ) -> bool {
+        let mut routes = self
+            .routes
+            .lock()
+            .expect("routes mutex must not be poisoned");
+        let Some(conn_key) = routes.resolve(data, from) else {
+            return false;
+        };
+        let datagram = InboundDatagram {
+            data: data.to_vec(),
+            from: *from,
+            local_addr,
+            ecn,
+        };
+        if !routes.deliver(&conn_key, datagram) {
+            // 受信側が既に drop されている。経路を除去して、以後この CID 宛ての
+            // パケットは新規接続として扱う。
+            routes.remove(&conn_key);
+        }
+        true
     }
 
     /// 既存接続のパケットを処理する
@@ -1995,6 +2298,26 @@ impl Server {
             .filter(|(_, key)| *key == conn_key)
             .map(|(cid, _)| cid.clone())
             .collect();
+        // 長さ 0 のコネクション ID を使う構成では、ピアのアドレスが唯一の
+        // 手がかりになる (RFC 9000 Section 5.1)
+        let addrs: Vec<SocketAddr> = self
+            .addr_map
+            .iter()
+            .filter(|(_, key)| *key == conn_key)
+            .map(|(addr, _)| *addr)
+            .collect();
+
+        // 経路と受信キューを接続ハンドルと共有する。これ以降、どちらのリーダーが
+        // 読んだデータグラムでもこの接続へ届く (`SharedRoutes` を参照)。
+        let (sender, inbound_rx) = mpsc::channel(MAX_QUEUED_DATAGRAMS);
+        {
+            let mut routes = self
+                .routes
+                .lock()
+                .expect("routes mutex must not be poisoned");
+            routes.register(conn_key, sender, &taken, &addrs);
+        }
+
         for cid in taken {
             self.remember_taken_cid(cid);
         }
@@ -2011,6 +2334,8 @@ impl Server {
             } else {
                 Vec::new()
             },
+            routes: Arc::clone(&self.routes),
+            inbound_rx,
         }
     }
 
@@ -2053,8 +2378,17 @@ impl Server {
     }
 
     /// 引き渡し済みの CID かどうかを返す
+    ///
+    /// accept 済み接続が退役させた CID は接続ハンドル側の経路表が持つため、
+    /// 両方を確認する。
     fn is_taken_cid(&self, cid: &ConnectionId) -> bool {
-        self.taken_cids.contains(cid)
+        if self.taken_cids.contains(cid) {
+            return true;
+        }
+        self.routes
+            .lock()
+            .expect("routes mutex must not be poisoned")
+            .is_taken_cid(cid)
     }
 
     /// 接続をマップとルーティングテーブルから除去する
