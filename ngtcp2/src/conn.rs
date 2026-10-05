@@ -2110,6 +2110,9 @@ unsafe extern "C" fn remove_connection_id_callback(
 unsafe extern "C" fn rand_callback(buf: *mut u8, buflen: usize, _rand_ctx: *const ngtcp2_rand_ctx) {
     // SAFETY: buf は呼び出し元から渡された buflen バイトの有効な領域
     let slice = unsafe { std::slice::from_raw_parts_mut(buf, buflen) };
+    // このコールバックは void を返すため失敗を ngtcp2 に伝えられない。
+    // aws-lc の rand::fill はシステム乱数が使えない場合にしか失敗せず、
+    // その場合でもゼロ埋めの buf が渡るだけでメモリ安全性は損なわれない。
     let _ = aws_lc_rs::rand::fill(slice);
 }
 

@@ -14,6 +14,10 @@
 // 抑制する lint は実際に発火するものだけを列挙する。`#[expect]` は発火しなかった
 // ときに unfulfilled_lint_expectations 警告になるため、過剰に指定できない。
 // bindgen のバージョンや ngtcp2 の更新で発火する lint が変わったらここを見直すこと。
+//
+// bindings.rs のレイアウト検査に残る `#[allow]` は bindgen の生成物であり、
+// 再生成のたびに戻るため手を入れない。ここで `#[expect]` に置き換えると発火しない
+// 検査項目が生じて unfulfilled_lint_expectations 警告になる。
 #![expect(non_upper_case_globals, non_camel_case_types)]
 
 include!("bindings.rs");

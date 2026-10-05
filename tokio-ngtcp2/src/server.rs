@@ -254,8 +254,8 @@ impl ServerConfig {
     /// 接続ごとに `<ディレクトリ>/<SCID>.sqlog` を作り、qlog (JSON Text
     /// Sequence、RFC 7464) を書き出す。ディレクトリが無い場合は作る。
     /// ファイルを開けない場合は qlog を無効にして接続は続ける。
-    pub fn with_qlog_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
-        self.qlog_dir = Some(dir.into());
+    pub fn with_qlog_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.qlog_dir = Some(dir.as_ref().to_path_buf());
         self
     }
 
@@ -1646,7 +1646,7 @@ impl Server {
                 // closing / draining 状態に移行済み。remove_closed_connections が除去する
             }
             ConnectionErrorKind::TransportClose | ConnectionErrorKind::ApplicationClose => {
-                eprintln!("[shiguredo_ngtcp2_tokio] closing connection: {err}");
+                tracing::warn!("closing connection: {err}");
                 let ts = timestamp();
 
                 let packets = {
@@ -1774,9 +1774,7 @@ impl Server {
                         Err(e) => {
                             // 不正なトークンには接続状態を作らずに
                             // INVALID_TOKEN を返す (RFC 9000 Section 8.1.3)
-                            eprintln!(
-                                "[shiguredo_ngtcp2_tokio] rejected address validation token: {e}"
-                            );
+                            tracing::warn!("rejected address validation token: {e}");
                             self.send_invalid_token_close(&accepted, version, from, local_addr)
                                 .await;
                             return;
@@ -1808,7 +1806,7 @@ impl Server {
             accepted.dcid.clone()
         } else {
             let Some(scid) = generate_scid(self.config.scid_len) else {
-                eprintln!("[shiguredo_ngtcp2_tokio] failed to generate scid");
+                tracing::error!("failed to generate scid");
                 return;
             };
             scid
@@ -1821,7 +1819,7 @@ impl Server {
             match ConnectionId::random(INTERNAL_KEY_LEN) {
                 Some(key) => key,
                 None => {
-                    eprintln!("[shiguredo_ngtcp2_tokio] failed to generate connection key");
+                    tracing::error!("failed to generate connection key");
                     return;
                 }
             }
@@ -1832,7 +1830,7 @@ impl Server {
         let tls_session = match self.tls_ctx.create_session() {
             Ok(session) => session,
             Err(e) => {
-                eprintln!("[shiguredo_ngtcp2_tokio] failed to create TLS session: {e}");
+                tracing::error!("failed to create TLS session: {e}");
                 return;
             }
         };
@@ -1920,7 +1918,7 @@ impl Server {
         ) {
             Ok(conn) => conn,
             Err(e) => {
-                eprintln!("[shiguredo_ngtcp2_tokio] failed to create connection: {e}");
+                tracing::error!("failed to create connection: {e}");
                 return;
             }
         };
@@ -2034,7 +2032,7 @@ impl Server {
         ts: u64,
     ) {
         let Some(retry_scid) = generate_scid(self.config.scid_len) else {
-            eprintln!("[shiguredo_ngtcp2_tokio] failed to generate retry scid");
+            tracing::error!("failed to generate retry scid");
             return;
         };
 
@@ -2042,7 +2040,7 @@ impl Server {
         {
             Ok(token) => token,
             Err(e) => {
-                eprintln!("[shiguredo_ngtcp2_tokio] failed to generate retry token: {e}");
+                tracing::error!("failed to generate retry token: {e}");
                 return;
             }
         };
@@ -2058,7 +2056,7 @@ impl Server {
             Ok(written) if written > 0 => written,
             Ok(_) => return,
             Err(e) => {
-                eprintln!("[shiguredo_ngtcp2_tokio] failed to write retry packet: {e}");
+                tracing::warn!("failed to write retry packet: {e}");
                 return;
             }
         };
@@ -2099,7 +2097,7 @@ impl Server {
             Ok(written) if written > 0 => written,
             Ok(_) => return,
             Err(e) => {
-                eprintln!("[shiguredo_ngtcp2_tokio] failed to write connection close: {e}");
+                tracing::warn!("failed to write connection close: {e}");
                 return;
             }
         };
@@ -2136,7 +2134,7 @@ impl Server {
             Ok(written) if written > 0 => self.send_buf[..written].to_vec(),
             Ok(_) => return,
             Err(e) => {
-                eprintln!("[shiguredo_ngtcp2_tokio] failed to write version negotiation: {e}");
+                tracing::warn!("failed to write version negotiation: {e}");
                 return;
             }
         };
@@ -2203,7 +2201,7 @@ impl Server {
                     // (RFC 9000 Section 10.3.3)。それ以上短い CID でも同じため打ち切る。
                 }
                 Err(e) => {
-                    eprintln!("[shiguredo_ngtcp2_tokio] failed to write stateless reset: {e}");
+                    tracing::warn!("failed to write stateless reset: {e}");
                 }
             }
             return;
@@ -2233,7 +2231,7 @@ impl Server {
                 match e.classify_connection_error() {
                     ConnectionErrorKind::Ignore | ConnectionErrorKind::Terminal => {}
                     _ => {
-                        eprintln!("[shiguredo_ngtcp2_tokio] connection error: {e}");
+                        tracing::warn!("connection error: {e}");
                         self.remove_connection(&key);
                     }
                 }
@@ -2479,7 +2477,7 @@ fn submit_new_token(conn: &mut ServerConnection) {
     let token = match generate_new_token(&secret, conn.remote_addr, ts) {
         Ok(token) => token,
         Err(e) => {
-            eprintln!("[shiguredo_ngtcp2_tokio] failed to generate a new token: {e}");
+            tracing::error!("failed to generate a new token: {e}");
             return;
         }
     };
@@ -2487,7 +2485,7 @@ fn submit_new_token(conn: &mut ServerConnection) {
     match conn.conn.submit_new_token(token.as_bytes()) {
         Ok(()) => conn.new_token_submitted = true,
         Err(e) => {
-            eprintln!("[shiguredo_ngtcp2_tokio] failed to submit a new token: {e}");
+            tracing::warn!("failed to submit a new token: {e}");
         }
     }
 }
@@ -2732,8 +2730,6 @@ mod tests {
         data[5] = 8;
         data[14] = 4;
         // 未知のバージョンでは種別を判定できないこと
-        let _ = &data;
-
         let info = version_negotiation_info(&data, &supported_versions())
             .expect("サポート外のバージョンは Version Negotiation が必要なこと");
         assert_eq!(info.version, 0xdead_beef, "クライアントのバージョン");

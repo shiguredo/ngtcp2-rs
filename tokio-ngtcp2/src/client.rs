@@ -1,6 +1,7 @@
 //! QUIC クライアントの非同期実装
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::time::Duration;
 
 use shiguredo_ngtcp2::{
@@ -152,8 +153,8 @@ impl ClientConfig {
     /// 接続ごとに `<ディレクトリ>/<SCID>.sqlog` を作り、qlog (JSON Text
     /// Sequence、RFC 7464) を書き出す。ディレクトリが無い場合は作る。
     /// ファイルを開けない場合は qlog を無効にして接続は続ける。
-    pub fn with_qlog_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
-        self.qlog_dir = Some(dir.into());
+    pub fn with_qlog_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.qlog_dir = Some(dir.as_ref().to_path_buf());
         self
     }
 
@@ -1156,7 +1157,7 @@ impl Client {
 async fn send_packets(socket: &Socket, packets: &[OutgoingPacket]) {
     for pkt in packets {
         if let Err(e) = socket.send_to(&pkt.data, pkt.remote, pkt.ecn).await {
-            eprintln!("[shiguredo_ngtcp2_tokio] send error: {e}");
+            tracing::warn!("send error: {e}");
         }
     }
 }

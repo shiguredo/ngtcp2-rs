@@ -473,7 +473,7 @@ impl ServerSockets {
                 .send_to(&packet.data, packet.local, packet.remote, packet.ecn)
                 .await
             {
-                eprintln!("[shiguredo_ngtcp2_tokio] send error: {e}");
+                tracing::warn!("send error: {e}");
             }
         }
     }

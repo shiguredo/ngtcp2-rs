@@ -21,12 +21,13 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - run: rustup update stable
+      # rust-toolchain.toml に固定した MSRV のツールチェーンを導入する
+      - run: rustup show
 
       - uses: shiguredo/github-actions/.github/actions/rust-cache@main
         with:
           os: ${{ matrix.os }}
-          toolchain: stable
+          toolchain: "1.93"
 
       # このリポジトリは libc::sockaddr_storage など POSIX ソケット型に依存するため
       # Windows は対象外。対応プラットフォームは README を参照。

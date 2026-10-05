@@ -1,3 +1,7 @@
+# MSRV に固定する。Cargo.toml の rust-version と必ず一致させること
+#
+# "stable" を指定すると cargo clippy などが MSRV ではなく最新の stable で
+# 動いてしまい、MSRV でビルドできないコードを見逃す。
 [toolchain]
-channel = "stable"
-components = ["rustfmt", "clippy"]
+channel = "1.93"
+components = ["rustfmt", "clippy", "llvm-tools"]

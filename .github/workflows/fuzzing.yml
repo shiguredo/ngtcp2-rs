@@ -21,11 +21,12 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - run: rustup update stable
+      # rust-toolchain.toml に固定した MSRV のツールチェーンを導入する
+      - run: rustup show
 
       # fuzz はルートの workspace とは別の workspace のため、ci.yml では検査して
       # いない。fmt と clippy はここで検査する (crate の公開 API だけを使うため
-      # stable でもビルドできる)
+      # MSRV の 1.93 でもビルドできる)
       - name: Check the fuzz workspace
         working-directory: fuzz
         run: |

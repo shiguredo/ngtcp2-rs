@@ -20,7 +20,8 @@ path = "src/lib.rs"
 #
 # tests/e2e/ 配下のテストは auto-discovery では目的の名前にならないため、
 # `make test` や CI から個別に指定できるよう明示的に宣言する。
-# tests/helpers/ と tests/interop/ はテストターゲットではないため宣言しない。
+# tests/e2e/helpers/ はテストターゲットではないため宣言しない
+# (各テストが `#[path]` で必要なファイルだけを取り込む)。
 [[test]]
 name = "test_config"
 path = "tests/test_config.rs"
@@ -96,6 +97,8 @@ libc = "0.2"
 shiguredo_ngtcp2.workspace = true
 # 非同期ランタイム
 tokio = { version = "1.53", features = ["full"] }
+# ログ出力 (フィルタリングは利用側が tracing-subscriber で行う)
+tracing = "0.1"
 
 [dev-dependencies]
 # テスト用の自己署名証明書生成

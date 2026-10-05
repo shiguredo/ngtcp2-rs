@@ -33,10 +33,7 @@ impl QlogWriter {
     /// して接続自体は続ける (qlog は診断用のため、失敗で接続を止めない)。
     pub(crate) fn new(dir: &Path, name: &str) -> Self {
         if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!(
-                "[shiguredo_ngtcp2_tokio] failed to create the qlog directory {}: {e}",
-                dir.display()
-            );
+            tracing::warn!("failed to create the qlog directory {}: {e}", dir.display());
             return Self::disabled();
         }
 
@@ -44,10 +41,7 @@ impl QlogWriter {
         match File::create(&path) {
             Ok(file) => Self { file: Some(file) },
             Err(e) => {
-                eprintln!(
-                    "[shiguredo_ngtcp2_tokio] failed to create the qlog file {}: {e}",
-                    path.display()
-                );
+                tracing::warn!("failed to create the qlog file {}: {e}", path.display());
                 Self::disabled()
             }
         }
@@ -61,7 +55,7 @@ impl QlogWriter {
 
         while let Some(data) = conn.poll_qlog_data() {
             if let Err(e) = file.write_all(&data) {
-                eprintln!("[shiguredo_ngtcp2_tokio] failed to write qlog: {e}");
+                tracing::warn!("failed to write qlog: {e}");
                 self.file = None;
                 return;
             }

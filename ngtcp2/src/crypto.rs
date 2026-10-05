@@ -262,7 +262,14 @@ impl TlsContext {
     /// * `cert_path` - 証明書ファイルのパス (PEM 形式)
     /// * `key_path` - 秘密鍵ファイルのパス (PEM 形式)
     /// * `alpn` - ALPN プロトコルリスト (例: `&[b"hq-interop"]`)
-    pub fn new_server(cert_path: &Path, key_path: &Path, alpn: &[&[u8]]) -> Result<Self> {
+    pub fn new_server(
+        cert_path: impl AsRef<Path>,
+        key_path: impl AsRef<Path>,
+        alpn: &[&[u8]],
+    ) -> Result<Self> {
+        // 呼び出し中だけパスを参照できればよい
+        let cert_path = cert_path.as_ref();
+        let key_path = key_path.as_ref();
         // SAFETY: aws-lc の SSL_CTX 生成と設定を行う。生成に失敗した場合は
         // 即座に解放し、成功した場合は Self が所有権を持つ。
         unsafe {

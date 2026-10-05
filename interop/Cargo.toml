@@ -35,14 +35,7 @@ rcgen = "0.14"
 # s2n-tls を使う既定の provider ではなく rustls を使う。s2n-tls の C ライブラリを
 # ビルドすると aws-lc がもう 1 つ増え、ngtcp2-sys がリンクする aws-lc と
 # シンボルが衝突するため。
-s2n-quic = {
-  version = "1.88",
-  default-features = false,
-  features = [
-    "provider-address-token-default",
-    "provider-tls-rustls",
-  ]
-}
+s2n-quic = { version = "1.88", default-features = false, features = ["provider-address-token-default", "provider-tls-rustls"] }
 # 検証対象の実装
 #
 # 相互運用テストは ngtcp2 をソースからビルドする。prebuilt はリリース済みの
