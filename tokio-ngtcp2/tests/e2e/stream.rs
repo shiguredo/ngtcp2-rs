@@ -11,7 +11,7 @@ use shiguredo_ngtcp2_tokio::{
     AcceptedConnection, Client, ClientConfig, CongestionAlgorithm, ConnectionEvent, ServerConfig,
     Settings,
 };
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 #[path = "helpers/certs.rs"]
 mod certs;
@@ -274,6 +274,164 @@ async fn test_zero_length_data_with_fin() {
 
         let received = read_stream_to_end(&mut pair.server, stream_id).await;
         assert!(received.is_empty(), "データが空であること");
+    })
+    .await;
+
+    result.expect("テストがタイムアウトしないこと");
+}
+
+/// 輻輳ウィンドウ枯渇中に積んだ 0 長 FIN が欠落しないこと
+///
+/// データ長 0 で FIN だけを送る書き込み (`write_stream(stream_id, b"", true)`) を、
+/// 輻輳ウィンドウを使い切った直後に行う。ngtcp2 は輻輳制限でパケットを書けない
+/// 場合に 0 を返し、STREAM フレームを書かないため `*pdatalen` は -1 のまま
+/// (未受理) になる。この「未受理 (None)」と「0 バイト受理 (Some(0))」を区別
+/// できないと、FIN が送信済みとして破棄され、ピアに届かなくなる。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_zero_length_fin_after_cwnd_exhaustion() {
+    // フロー制御が制限にならないよう、両側で十分大きなウィンドウを通知する
+    let params = TransportParams::new()
+        .with_initial_max_stream_data_bidi_local(4 * 1024 * 1024)
+        .with_initial_max_stream_data_bidi_remote(4 * 1024 * 1024)
+        .with_initial_max_data(4 * 1024 * 1024);
+    let cert = TestCert::generate("stream_zero_fin_cwnd");
+    let mut pair = connect_pair(
+        &cert,
+        Some(ServerConfig::new(&[b"hq-interop"]).with_transport_params(params.clone())),
+        default_client_config().with_transport_params(params),
+    )
+    .await;
+
+    let result = timeout(TEST_TIMEOUT, async {
+        // クライアントが ACK を処理しない状態で大きなデータを flush し、
+        // 輻輳ウィンドウを使い切る。ACK を処理しないのでウィンドウは開かない
+        let data_stream = pair
+            .client
+            .open_bidi_stream()
+            .expect("データ用のストリームを開けること");
+        let payload = vec![0x5au8; 256 * 1024];
+        pair.client
+            .write_stream(data_stream, &payload, false)
+            .expect("データを送信待ちに積めること");
+        // 1 回の flush では pacing 制限で送りきれない場合があるため、
+        // cwnd が尽きるまで時間を進めながら繰り返す
+        for _ in 0..500 {
+            pair.client
+                .flush()
+                .await
+                .expect("輻輳ウィンドウの上限までデータを送信できること");
+            if pair.client.cwnd_left() == 0 {
+                break;
+            }
+            sleep(Duration::from_millis(1)).await;
+        }
+        let stats = pair.client.stats();
+        println!(
+            "データの flush 直後の輻輳状態: cwnd={} bytes_in_flight={} cwnd_left={}",
+            stats.cwnd,
+            stats.bytes_in_flight,
+            pair.client.cwnd_left()
+        );
+        assert_eq!(
+            pair.client.cwnd_left(),
+            0,
+            "データの flush 直後に輻輳ウィンドウが枯渇していること"
+        );
+
+        // 輻輳ウィンドウが枯渇している間に、別ストリームで 0 長 FIN を積んで
+        // flush する。ngtcp2 はこの時点でパケットを書けないため、STREAM フレームは
+        // 書かれず FIN はまだ送信されていない
+        let fin_stream = pair
+            .client
+            .open_bidi_stream()
+            .expect("FIN 用のストリームを開けること");
+        pair.client
+            .write_stream(fin_stream, b"", true)
+            .expect("0 長 FIN を送信待ちに積めること");
+        pair.client
+            .flush()
+            .await
+            .expect("0 長 FIN の送信を試みられること");
+        println!(
+            "0 長 FIN の flush 直後: cwnd_left={} 送信待ちあり={}",
+            pair.client.cwnd_left(),
+            pair.client.has_pending_data()
+        );
+
+        // サーバーがデータ用ストリームで受信した量と、FIN 用ストリームの
+        // FIN を受信したかどうかを記録する
+        let mut data_received = 0usize;
+        let mut fin_received = false;
+
+        // 第 1 段階: 両側を交互に駆動し、データが全量サーバーに届くまで待つ。
+        // クライアントが ACK を処理して輻輳ウィンドウが開くことで送信が進む
+        let data_deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < data_deadline && data_received < payload.len() {
+            // クライアント側で ACK などを処理する (輻輳ウィンドウを開ける)
+            if timeout(Duration::from_millis(1), pair.client.recv_event())
+                .await
+                .is_ok()
+            {
+                // クライアントはデータを送るだけなので、受信イベントは使わない
+            }
+            // サーバー側でデータを受信する
+            if let Ok(Ok(event)) = timeout(Duration::from_millis(1), pair.server.recv_event()).await
+                && let ConnectionEvent::StreamData {
+                    stream_id,
+                    data,
+                    fin,
+                } = event
+            {
+                if stream_id == data_stream {
+                    data_received += data.len();
+                } else if stream_id == fin_stream && fin {
+                    fin_received = true;
+                }
+            }
+        }
+        println!(
+            "データ用ストリームの受信量: {} / {} バイト",
+            data_received,
+            payload.len()
+        );
+
+        // 第 2 段階: FIN が届くまで待つ。データの全量受信後は輻輳ウィンドウが
+        // 開いているため、FIN が送信待ちに残っていればすぐに届く
+        let fin_deadline = Instant::now() + Duration::from_secs(5);
+        while !fin_received && Instant::now() < fin_deadline {
+            if timeout(Duration::from_millis(1), pair.client.recv_event())
+                .await
+                .is_ok()
+            {
+                // クライアント側の受信イベントは使わない
+            }
+            if let Ok(Ok(event)) = timeout(Duration::from_millis(1), pair.server.recv_event()).await
+                && let ConnectionEvent::StreamData {
+                    stream_id,
+                    data,
+                    fin,
+                } = event
+            {
+                if stream_id == data_stream {
+                    data_received += data.len();
+                } else if stream_id == fin_stream && fin {
+                    fin_received = true;
+                }
+            }
+        }
+        println!("0 長 FIN を受信したか: {fin_received}");
+
+        // データが全量届いていること (FIN の欠落とは独立にデータ経路は正常)
+        assert_eq!(
+            data_received,
+            payload.len(),
+            "FIN の有無にかかわらずデータは全量届くこと"
+        );
+        // 0 長 FIN が届いていること (現行コードではここで失敗する)
+        assert!(
+            fin_received,
+            "輻輳ウィンドウ枯渇中に積んだ 0 長 FIN がサーバーに届くこと"
+        );
     })
     .await;
 

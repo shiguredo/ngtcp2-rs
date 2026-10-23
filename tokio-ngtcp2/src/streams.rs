@@ -194,18 +194,28 @@ pub(crate) fn write_packets(
 
             match result {
                 Ok((written, data_written, path, info)) => {
-                    // 受理された分だけ送信待ちから取り除く
+                    // 受理された分だけ送信待ちから取り除く。
+                    //
+                    // ngtcp2 は STREAM フレームを書かなかった場合 `*pdatalen` を
+                    // 更新しない (`write_stream_with_flags` では `data_written`
+                    // が `None` になる)。`Some(0)` は 0 長 STREAM フレームを
+                    // 書いたことを意味するため、両者を区別する必要がある。
+                    // 特に 0 長 FIN では `data_len` が 0 になるため、`None` を
+                    // 0 として扱うと FIN を送信済みと誤判定して破棄してしまう。
                     let consumed = data_written.unwrap_or(0);
+                    // FIN が載ったのは、ngtcp2 が渡したデータをすべて STREAM
+                    // フレームとして受理した場合だけである
+                    let fin_accepted = data_written == Some(data_len);
                     if let Some(entry) = pending.entries.get_mut(&stream_id) {
                         let drain = consumed.min(entry.0.len());
                         entry.0.drain(..drain);
-                        if fin && consumed >= data_len {
+                        if fin && fin_accepted {
                             entry.1 = false;
                         }
                     }
                     pending.prune(stream_id);
 
-                    if consumed > 0 || (fin && consumed >= data_len) {
+                    if consumed > 0 || (fin && fin_accepted) {
                         wrote_any = true;
                     }
 
