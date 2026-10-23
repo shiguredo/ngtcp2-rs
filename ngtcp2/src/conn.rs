@@ -165,8 +165,12 @@ struct ConnectionUserData {
 ///
 /// ngtcp2 は STREAM フレームを再送するとき、アプリケーションが渡した
 /// バッファをそのまま参照する (`ngtcp2_conn_writev_stream` の契約)。そのため
-/// 書き出したデータは ACK されるまで保持する必要がある。ACK は重複のない
-/// 増加する範囲で通知されるため、先頭から順に捨てられる。
+/// 書き出したデータは ACK されるまで同じ領域に保持し、移動も解放もしない。
+///
+/// `Vec<u8>` の再確保や先頭の詰め直しは、ngtcp2 が保持しているポインタを
+/// 無効にする。そのため、追記で容量が足りない場合は新しい領域に未 ACK の
+/// データを写し、参照が残っている旧領域は [`RetiredBuffer`] に退避して
+/// ACK されるまで解放しない。
 struct InFlightStreamData {
     /// `data[start..]` の先頭がストリームの何バイト目か
     offset: u64,
@@ -174,13 +178,20 @@ struct InFlightStreamData {
     data: Vec<u8>,
     /// 未 ACK の先頭 (data の先頭からの相対位置)
     start: usize,
+    /// 追記で領域を差し替えたときに退避した旧バッファ
+    ///
+    /// ngtcp2 が再送のために参照しているポインタを含むため、対応する
+    /// ストリーム範囲が ACK されるまで保持する。
+    retired: Vec<RetiredBuffer>,
 }
 
-/// 未 ACK のデータを捨てる際に、これだけたまったら詰め直す
-///
-/// ACK のたびに Vec を詰め直すと転送量の二乗のコストになるため、
-/// 一定量たまるまで先頭のインデックスを進めるだけにする。
-const IN_FLIGHT_COMPACT_THRESHOLD: usize = 64 * 1024;
+/// 追記で領域を差し替えたときに退避した旧バッファ
+struct RetiredBuffer {
+    /// 旧バッファ (ngtcp2 が参照している領域を解放しないために保持する)
+    _data: Vec<u8>,
+    /// このバッファが持つデータの終端のストリームオフセット (排他的)
+    end: u64,
+}
 
 impl InFlightStreamData {
     /// 未 ACK のデータを返す
@@ -194,14 +205,16 @@ impl InFlightStreamData {
     /// `offset` までの ACK を受け取ったものとして先頭を捨てる
     ///
     /// ngtcp2 は重複のない増加する範囲で通知するため、通知された終端より
-    /// 前をまとめて捨てられる。
+    /// 前をまとめて捨てられる。ただし未 ACK のバイト列をメモリ上で移動させると
+    /// ngtcp2 が保持するポインタが指す内容が変わるため、詰め直しは行わず、
+    /// 先頭のインデックスを進めるだけにする。
     fn ack_until(&mut self, offset: u64) {
         if offset <= self.offset {
             return;
         }
 
         let acked = usize::try_from(offset - self.offset).unwrap_or(usize::MAX);
-        let acked = acked.min(self.data.len());
+        let acked = acked.min(self.data.len() - self.start);
         self.offset += acked as u64;
         self.start += acked;
 
@@ -209,14 +222,40 @@ impl InFlightStreamData {
             // すべて ACK された。オフセットは保持する
             self.data.clear();
             self.start = 0;
-        } else if self.start >= IN_FLIGHT_COMPACT_THRESHOLD {
-            self.data.drain(..self.start);
-            self.start = 0;
         }
+
+        // 参照するデータがすべて ACK された退避バッファを解放する
+        let offset = self.offset;
+        self.retired.retain(|retired| retired.end > offset);
     }
 
     /// 未 ACK のデータに追加して、追加した範囲を返す
+    ///
+    /// 追記で `Vec` の容量が足りない場合は再確保せず、新しい領域に未 ACK の
+    /// データを写してから追加する。再確保すると ngtcp2 が保持するポインタが
+    /// 無効になるため。
     fn append(&mut self, data: &[u8]) -> std::ops::Range<usize> {
+        if self.data.len() + data.len() > self.data.capacity() {
+            let needed = self.data.len() + data.len();
+            let capacity = needed.max(self.data.capacity().saturating_mul(2));
+            if self.data.is_empty() {
+                self.data = Vec::with_capacity(capacity);
+            } else {
+                let mut new_data = Vec::with_capacity(capacity);
+                new_data.extend_from_slice(&self.data[self.start..]);
+                // 旧領域は ngtcp2 が参照している可能性があるため、
+                // ACK されるまで退避して解放しない
+                let end = self.offset + (self.data.len() - self.start) as u64;
+                let old_data = std::mem::take(&mut self.data);
+                self.retired.push(RetiredBuffer {
+                    _data: old_data,
+                    end,
+                });
+                self.data = new_data;
+                self.start = 0;
+            }
+        }
+
         let start = self.data.len();
         self.data.extend_from_slice(data);
         start..self.data.len()
@@ -225,6 +264,7 @@ impl InFlightStreamData {
     /// 書き出されなかった末尾を捨てる
     ///
     /// 呼び出し元は書き出されなかったデータを次の呼び出しで渡し直す。
+    /// 末尾を縮めるだけで、ngtcp2 が参照している領域は動かさない。
     fn truncate_unwritten(&mut self, len: usize) {
         self.data.truncate(self.start + len);
     }
@@ -959,6 +999,7 @@ impl Connection {
                 offset: 0,
                 data: Vec::new(),
                 start: 0,
+                retired: Vec::new(),
             });
         let appended = entry.append(data);
         // 渡すのは今回追加した範囲だけにする。未 ACK のデータは既に ngtcp2 が
@@ -2627,6 +2668,7 @@ mod tests {
             offset: 0,
             data: Vec::new(),
             start: 0,
+            retired: Vec::new(),
         };
         let appended = data.append(b"0123456789");
         assert_eq!(appended, 0..10, "追加した範囲が返ること");
@@ -2658,6 +2700,7 @@ mod tests {
             offset: 0,
             data: Vec::new(),
             start: 0,
+            retired: Vec::new(),
         };
         data.append(b"0123456789");
         // 4 バイトだけ書き出された
@@ -2670,6 +2713,68 @@ mod tests {
         assert_eq!(data.unacked(), b"0123456789", "連結されること");
     }
 
+    /// 追記で領域を差し替えても、ngtcp2 に渡した旧領域が保持されること
+    ///
+    /// ngtcp2 は再送のために書き出したバッファを参照し続ける。`Vec` の
+    /// 再確保で旧領域を解放すると参照先が無効になるため、ACK されるまで
+    /// 退避して保持する。
+    #[test]
+    fn test_in_flight_stream_data_keeps_handed_buffer_stable() {
+        let mut data = InFlightStreamData {
+            offset: 0,
+            data: Vec::new(),
+            start: 0,
+            retired: Vec::new(),
+        };
+        let appended = data.append(b"0123456789");
+        // ngtcp2 に渡されるポインタと同じ位置を記録する
+        let written = data.data[appended].as_ptr();
+
+        // 容量を超える追記で領域が差し替わる
+        data.append(&vec![b'x'; 1024]);
+        assert_eq!(data.retired.len(), 1, "旧領域が退避されること");
+        // SAFETY: 旧領域は retired が保持しているため、追記後も有効。
+        // 記録したポインタは旧データの 10 バイトを指す
+        let kept = unsafe { std::slice::from_raw_parts(written, 10) };
+        assert_eq!(kept, b"0123456789", "旧領域の内容が変わらないこと");
+
+        // ACK が進むと退避した領域は解放される
+        data.ack_until(10);
+        assert!(data.retired.is_empty(), "ACK 済みの旧領域は解放されること");
+    }
+
+    /// ACK で未 ACK のバイト列が移動しないこと
+    ///
+    /// 移動すると ngtcp2 が保持するポインタが指す内容が変わる。
+    #[test]
+    fn test_in_flight_stream_data_ack_does_not_move_unacked_bytes() {
+        let mut data = InFlightStreamData {
+            offset: 0,
+            data: Vec::new(),
+            start: 0,
+            retired: Vec::new(),
+        };
+        let payload: Vec<u8> = (0..200 * 1024).map(|i| (i * 131) as u8).collect();
+        data.append(&payload);
+        let base = data.data.as_ptr();
+
+        data.ack_until(100 * 1024);
+        assert_eq!(data.start, 100 * 1024, "未 ACK の先頭が進むこと");
+        assert_eq!(
+            data.unacked(),
+            &payload[100 * 1024..],
+            "未 ACK の内容が保たれること"
+        );
+        // SAFETY: base は 200 KiB の領域の先頭で、ACK 後も data は縮まない。
+        // 詰め直しを行わないため、100 KiB 以降の内容は元のまま残る
+        let kept = unsafe { std::slice::from_raw_parts(base.add(100 * 1024), 1024) };
+        assert_eq!(
+            kept,
+            &payload[100 * 1024..100 * 1024 + 1024],
+            "未 ACK のバイト列が移動しないこと"
+        );
+    }
+
     /// ストリームが閉じたら送信済みデータを解放すること
     #[test]
     fn test_in_flight_stream_data_closed_stream() {
@@ -2680,6 +2785,7 @@ mod tests {
                 offset: 0,
                 data: b"abc".to_vec(),
                 start: 0,
+                retired: Vec::new(),
             },
         );
         user_data.in_flight_stream_data.insert(
@@ -2688,6 +2794,7 @@ mod tests {
                 offset: 0,
                 data: b"def".to_vec(),
                 start: 0,
+                retired: Vec::new(),
             },
         );
 
@@ -2712,6 +2819,7 @@ mod tests {
                 offset: 100,
                 data: b"abcdef".to_vec(),
                 start: 0,
+                retired: Vec::new(),
             },
         );
 
