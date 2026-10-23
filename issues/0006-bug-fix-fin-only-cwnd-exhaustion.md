@@ -1,7 +1,7 @@
 # 輻輳制限中に積んだ 0 長 FIN を失わずに送信する
 
 - Created: 2026-10-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-24
 - Branch: feature/fix-fin-only-cwnd-exhaustion
 - Polished: {YYYY-MM-DD}
 
@@ -61,3 +61,17 @@ FIN が届かないとピアはストリームの終端を観測できず、EOF 
 - 部分送信 + FIN、`NGTCP2_WRITE_STREAM_FLAG_MORE` を使う経路で既存の挙動が変わらない
 - `cargo test --workspace --tests --features source-build`、`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --features source-build -- -D warnings` が成功する
 - 下流プロジェクトの 100 ストリーム echo テストが、FIN を最終データと同時に送る回避策を外した状態でも成功する (下流側で確認)
+
+## 解決方法
+
+`tokio-ngtcp2/src/streams.rs` の `write_packets` で、FIN の受理を「ngtcp2 が渡したデータをすべて STREAM フレームとして受理した場合」だけと判定するようにした。具体的には `data_written == Some(data_len)` を `fin_accepted` として導入し、送信待ちの FIN を消す条件と `wrote_any` の判定の両方をこれに揃えた。`data_written` が `None` (STREAM フレームを書かなかった) の場合は FIN を送信待ちに残し、次回の `flush` / `recv_event` で再試行する。
+
+`ngtcp2/src/conn.rs` の `Connection::write_stream` と `Connection::write_stream_with_flags` の doc コメントに、戻り値の `None` が未受理、`Some(0)` が 0 長 STREAM フレームの受理を意味することを明記し、同じ混同を防ぐようにした。
+
+回帰テストとして `tokio-ngtcp2/tests/e2e/stream.rs` に `test_zero_length_fin_after_cwnd_exhaustion` を追加した。実 UDP の e2e で輻輳ウィンドウを使い切った直後に 0 長 FIN を積み、両側を駆動してサーバーが FIN を受信することを検証する。
+
+### 検証
+
+- 追加した回帰テストは修正前のコードで FIN が届かず失敗し、修正後は成功した
+- `cargo test --workspace --tests --features source-build` が成功した
+- `cargo fmt --all -- --check` と `cargo clippy --workspace --all-targets --features source-build -- -D warnings` が成功した
