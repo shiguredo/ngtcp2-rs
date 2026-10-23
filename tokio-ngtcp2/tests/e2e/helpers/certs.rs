@@ -24,7 +24,9 @@ impl TestCert {
         Self::generate_with_names(label, &["localhost"])
     }
 
-    /// 指定した SAN dNSName を持つ自己署名証明書を生成する
+    /// 指定した SAN を持つ自己署名証明書を生成する
+    ///
+    /// DNS 名は dNSName、IP アドレスは iPAddress として登録する。
     pub(crate) fn generate_with_names(label: &str, san_names: &[&str]) -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique_id = COUNTER.fetch_add(1, Ordering::SeqCst);

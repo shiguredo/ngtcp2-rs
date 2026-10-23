@@ -289,7 +289,7 @@ impl Connection {
     /// * `local_addr` - ローカルアドレス
     /// * `remote_addr` - リモートアドレス
     /// * `version` - 使用する QUIC バージョン (RFC 9000 Section 6)
-    /// * `server_name` - サーバー名 (SNI 兼ホスト名検証。DNS 名限定)
+    /// * `server_name` - 証明書の検証対象の DNS 名または IP アドレス。DNS 名の場合だけ SNI を送る
     /// * `tls_session` - TLS セッション (所有権を移す)
     /// * `params` - トランスポートパラメータ
     /// * `settings` - 接続設定。`Settings::initial_ts` に接続を作成する時刻
@@ -320,8 +320,9 @@ impl Connection {
             ));
         }
 
-        // SNI を設定する
+        // 証明書の検証対象と、DNS 名の場合の SNI を設定する
         tls_session.set_server_name(server_name)?;
+        tls_session.configure_peer_ip_verification()?;
 
         let callbacks = create_client_callbacks();
         let raw_settings = settings.to_raw();

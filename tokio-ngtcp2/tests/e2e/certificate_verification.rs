@@ -1,7 +1,7 @@
 //! 証明書検証の e2e テスト
 //!
-//! `verify_peer` による証明書チェーン検証とホスト名検証を確認する
-//! (RFC 9001 Section 4.4)。自己署名証明書を使うため、テストの実行順に
+//! `verify_peer` による証明書チェーン検証と DNS 名 / IP SAN の照合を確認する
+//! (RFC 9001 Section 4.4、RFC 9525 Section 6.4)。自己署名証明書を使うため、テストの実行順に
 //! 依存しないよう直列化する。
 
 use std::net::SocketAddr;
@@ -26,8 +26,13 @@ fn ephemeral_addr() -> SocketAddr {
 
 /// サーバーを起動してアドレスを返す
 async fn start_server(cert: &TestCert) -> SocketAddr {
+    start_server_on(cert, ephemeral_addr()).await
+}
+
+/// IPv4 / IPv6 の指定したアドレスでサーバーを起動する
+async fn start_server_on(cert: &TestCert, local: SocketAddr) -> SocketAddr {
     let mut server = Server::bind(
-        ephemeral_addr(),
+        local,
         cert.cert_path(),
         cert.key_path(),
         Some(ServerConfig::new(&[b"hq-interop"])),
@@ -44,6 +49,83 @@ async fn start_server(cert: &TestCert) -> SocketAddr {
     });
 
     addr
+}
+
+/// IPv4 / IPv6 とも、信頼した証明書の iPAddress SAN が一致すれば接続できること
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn test_verify_peer_succeeds_with_ip_san() {
+    for address in ["127.0.0.1:0", "[::1]:0"] {
+        let local: SocketAddr = address.parse().expect("接続先アドレスが有効であること");
+        let name = local.ip().to_string();
+        // rcgen は IP 文字列から SAN iPAddress を生成する。DNS 名の SAN は含めない。
+        let cert = TestCert::generate_with_names("cert_ip", &[&name]);
+        let addr = start_server_on(&cert, local).await;
+        let config = ClientConfig::new(&[b"hq-interop"])
+            .with_verify_peer(true)
+            .with_ca_cert_pem(cert.cert_pem());
+        let mut client = timeout(
+            TEST_TIMEOUT,
+            Client::connect_with_config(addr, local, &name, &config),
+        )
+        .await
+        .expect("ハンドシェイクがタイムアウトしないこと")
+        .expect("IP SAN が一致すれば証明書検証が成功すること");
+        assert!(client.is_handshake_completed(), "IP 直指定で接続できること");
+        client.close(0, b"").await.expect("接続を閉じられること");
+    }
+}
+
+/// IP SAN の不一致や欠落、未信頼の証明書を受け入れないこと
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn test_verify_peer_rejects_invalid_ip_identity() {
+    for (san, name, trusted) in [
+        ("127.0.0.2", "127.0.0.1", true),
+        ("::2", "::1", true),
+        ("localhost", "127.0.0.1", true),
+        ("127.0.0.1", "127.0.0.1", false),
+    ] {
+        let cert = TestCert::generate_with_names("cert_ip_rejected", &[san]);
+        let addr = start_server(&cert).await;
+        let mut config = ClientConfig::new(&[b"hq-interop"])
+            .with_verify_peer(true)
+            .with_handshake_timeout(Duration::from_secs(2));
+        if trusted {
+            config = config.with_ca_cert_pem(cert.cert_pem());
+        }
+        let result = timeout(
+            TEST_TIMEOUT,
+            Client::connect_with_config(addr, ephemeral_addr(), name, &config),
+        )
+        .await
+        .expect("テストがタイムアウトしないこと");
+        // IP リテラルは引数として受理し、TLS の検証で接続を拒否しなければならない。
+        assert!(
+            matches!(result, Err(error) if !matches!(error, shiguredo_ngtcp2_tokio::Error::InvalidArgument(_))),
+            "SAN の不一致、IP SAN の欠落、未信頼の証明書は TLS の検証で拒否すること"
+        );
+    }
+}
+
+/// 検証を無効にすると、DNS 名の自己署名証明書にも IP 直指定で接続できること
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn test_verify_peer_disabled_accepts_ip_literal() {
+    for address in ["127.0.0.1:0", "[::1]:0"] {
+        let local: SocketAddr = address.parse().expect("接続先アドレスが有効であること");
+        let cert = TestCert::generate("cert_ip_insecure");
+        let addr = start_server_on(&cert, local).await;
+        let config = ClientConfig::new(&[b"hq-interop"]).with_verify_peer(false);
+        let mut client = timeout(
+            TEST_TIMEOUT,
+            Client::connect_with_config(addr, local, &local.ip().to_string(), &config),
+        )
+        .await
+        .expect("ハンドシェイクがタイムアウトしないこと")
+        .expect("検証を無効にした IP 接続が成功すること");
+        client.close(0, b"").await.expect("接続を閉じられること");
+    }
 }
 
 /// CA を登録した上で証明書検証が成功すること

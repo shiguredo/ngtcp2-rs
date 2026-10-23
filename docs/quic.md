@@ -23,7 +23,8 @@
 - サーバー証明書の検証
   - `ClientConfig::verify_peer` で切り替える
   - `with_ca_cert_pem` でトラストストアに CA 証明書を追加できる
-  - SNI とホスト名を検証する
+  - DNS 名の場合は SNI を送信し、証明書の DNS 名を検証する
+  - IP アドレスの場合は SNI を送信せず、証明書の `iPAddress` SAN を検証する
 - ハンドシェイクのタイムアウト
   - `ClientConfig::handshake_timeout` は接続確立全体の待ち時間
   - `Settings::handshake_timeout` は ngtcp2 側の期限

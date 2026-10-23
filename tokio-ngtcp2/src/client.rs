@@ -43,7 +43,7 @@ pub struct ClientConfig {
     ///
     /// サーバーと一致しない場合はハンドシェイクが失敗する。
     pub alpn_protocols: Vec<Vec<u8>>,
-    /// ピアの証明書チェーンとホスト名を検証するかどうか (RFC 9001 Section 4.4)
+    /// ピアの証明書チェーンと DNS 名 / IP アドレスを検証するかどうか (RFC 9001 Section 4.4)
     ///
     /// true の場合、トラストストアはデフォルトの CA パスと `SSL_CERT_FILE` /
     /// `SSL_CERT_DIR` 環境変数から読み込む。
@@ -954,7 +954,8 @@ impl Client {
 
     /// 設定を指定して接続する
     ///
-    /// `verify_peer` が true の場合は証明書チェーンとホスト名を検証する
+    /// `server_name` は DNS 名または IP アドレスである。DNS 名の場合だけ SNI を送る。
+    /// `verify_peer` が true の場合は証明書チェーンと DNS 名 / IP アドレスを検証する
     /// (RFC 9001 Section 4.4)。検証に使うトラストストアはデフォルトの CA パスと
     /// `SSL_CERT_FILE` / `SSL_CERT_DIR` 環境変数、および
     /// [`ClientConfig::with_ca_cert_pem`] で追加した CA に依存する。

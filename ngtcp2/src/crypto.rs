@@ -480,6 +480,7 @@ impl TlsContext {
                 is_server: self.is_server,
                 accept_early_data: self.accept_early_data,
                 ticket_slot,
+                peer_ip: None,
             })
         }
     }
@@ -519,6 +520,11 @@ impl Drop for TlsContext {
 pub struct TlsSession {
     ssl: *mut SSL,
     is_server: bool,
+    /// 接続を作成するときに確定する IP SAN の検証対象
+    ///
+    /// aws-lc は IP 検証条件の解除に対応しないため、セッションの所有権が
+    /// Connection へ移るまで Rust 側に保持し、設定し直した古い IP を残さない。
+    peer_ip: Option<std::net::IpAddr>,
     /// 0-RTT (early data) を受け入れるかどうか (サーバー用)
     ///
     /// [`TlsContext::set_accept_early_data`] の値を引き継ぐ。
@@ -536,25 +542,25 @@ unsafe impl Send for TlsSession {}
 unsafe impl Sync for TlsSession {}
 
 impl TlsSession {
-    /// SNI (Server Name Indication) とホスト名検証を設定する
+    /// サーバーの DNS 名または IP アドレスを設定する
     ///
     /// クライアント接続で使用する。接続先のサーバー名を指定する。
     /// `verify_peer` が true の場合はホスト名検証 (証明書の SAN dNSName との照合。
     /// SAN に dNSName が無い証明書では CN にフォールバックする。CN-ID の使用は
     /// RFC 9110 Section 4.3.4 で MUST NOT とされているが、aws-lc の後方互換
     /// 挙動に従い現状は許容する) にも使用される (RFC 9001 Section 4.4)。
-    /// `verify_peer` が false の場合は `SSL_VERIFY_NONE` のためホスト名検証は効かない。
+    /// IP アドレスの場合は SNI を送らず、証明書の SAN iPAddress と照合する
+    /// (RFC 6066 Section 3、RFC 9525 Section 6.4)。IPv6 は角括弧を付けずに指定する。
+    /// `verify_peer` が false の場合は `SSL_VERIFY_NONE` のため名前と IP の検証は効かない。
     ///
-    /// `server_name` は **DNS 名に限定** する。ホスト名検証は IP アドレス SAN を
-    /// 照合しないため、IP アドレスを渡すと正しい証明書でも必ず検証失敗する。
     /// 空文字列・ワイルドカード・255 文字超はホスト名検証の誤動作や SNI の
     /// 仕様違反 (RFC 6066 Section 3 は HostName を FQDN に限定) につながるため
     /// 拒否する。
     ///
     /// # Errors
     ///
-    /// サーバーセッションの場合、`server_name` が DNS 名として不正な場合、
-    /// SNI またはホスト名検証の設定に失敗した場合はエラーを返す。
+    /// サーバーセッションの場合、`server_name` が不正な場合、
+    /// SNI または証明書の識別子の検証設定に失敗した場合はエラーを返す。
     pub fn set_server_name(&mut self, server_name: &str) -> Result<()> {
         if self.is_server {
             return Err(Error::InvalidArgument(
@@ -562,16 +568,10 @@ impl TlsSession {
             ));
         }
 
-        // ホスト名検証は DNS 名限定。IP アドレス・空文字列・ワイルドカード・
-        // 長すぎる名前を拒否する
+        // 無効な入力は TLS の設定を変更する前に拒否する。
         if server_name.is_empty() {
             return Err(Error::InvalidArgument(
-                "server_name must be a DNS name, not empty".to_string(),
-            ));
-        }
-        if server_name.parse::<std::net::IpAddr>().is_ok() {
-            return Err(Error::InvalidArgument(
-                "server_name must be a DNS name, not an IP address".to_string(),
+                "server_name must not be empty".to_string(),
             ));
         }
         if server_name.contains('*') {
@@ -590,25 +590,74 @@ impl TlsSession {
 
         let server_name_cstr = CString::new(server_name)
             .map_err(|_| Error::InvalidArgument("invalid server name".to_string()))?;
+        let peer_ip = server_name.parse::<std::net::IpAddr>().ok();
 
         // SAFETY: self.ssl は有効な SSL。server_name_cstr は呼び出し中のみ有効だが、
         // aws-lc は内部で複製するため呼び出し後に解放されて問題ない。
         unsafe {
-            let rv = SSL_set_tlsext_host_name(self.ssl, server_name_cstr.as_ptr());
+            let param = aws_lc_sys::SSL_get0_param(self.ssl);
+            if param.is_null() {
+                return Err(Error::Internal("SSL_get0_param failed".to_string()));
+            }
+            // RFC 6066 Section 3: IP リテラルを SNI の HostName に載せてはならない。
+            // 同じセッションに DNS 名を設定済みの場合も、NULL で以前の SNI を消す。
+            // 仕様の改訂や aws-lc の API 変更時は、この分岐を見直す必要がある。
+            let sni = if peer_ip.is_some() {
+                std::ptr::null()
+            } else {
+                server_name_cstr.as_ptr()
+            };
+            let rv = SSL_set_tlsext_host_name(self.ssl, sni);
             if rv != 1 {
                 return Err(Error::Internal(
                     "SSL_set_tlsext_host_name failed".to_string(),
                 ));
             }
 
-            // ホスト名検証を設定する (SSL_VERIFY_NONE のときは効かない)
-            // 証明書の dNSName と server_name を照合する
-            let rv = aws_lc_sys::SSL_set1_host(self.ssl, server_name_cstr.as_ptr());
-            if rv != 1 {
+            if peer_ip.is_some() {
+                // RFC 9525 Section 6.4: IP は iPAddress SAN と照合する。
+                // DNS 名から設定し直した場合に、古い DNS 名も検証することを防ぐ。
+                if aws_lc_sys::X509_VERIFY_PARAM_set1_host(param, std::ptr::null(), 0) != 1 {
+                    return Err(Error::Internal("failed to clear DNS identity".to_string()));
+                }
+            } else if aws_lc_sys::SSL_set1_host(self.ssl, server_name_cstr.as_ptr()) != 1 {
                 return Err(Error::Internal("SSL_set1_host failed".to_string()));
             }
         }
+        self.peer_ip = peer_ip;
 
+        Ok(())
+    }
+
+    /// 接続へ所有権を移した直後に IP SAN の検証条件を確定する
+    ///
+    /// 以後は `set_server_name` を呼ばず、その接続だけで TLS セッションを使う。
+    /// aws-lc が検証条件を設定できない場合はエラーを返す。
+    pub(crate) fn configure_peer_ip_verification(&mut self) -> Result<()> {
+        let Some(ip) = self.peer_ip else {
+            return Ok(());
+        };
+        // SAFETY: self.ssl は有効。SSL_get0_param の戻り値は SSL が所有する。
+        // octets は呼び出し中だけ参照され、aws-lc が内部でコピーする。
+        unsafe {
+            let param = aws_lc_sys::SSL_get0_param(self.ssl);
+            if param.is_null() {
+                return Err(Error::Internal("SSL_get0_param failed".to_string()));
+            }
+            let result = match ip {
+                std::net::IpAddr::V4(ip) => {
+                    aws_lc_sys::X509_VERIFY_PARAM_set1_ip(param, ip.octets().as_ptr(), 4)
+                }
+                std::net::IpAddr::V6(ip) => {
+                    aws_lc_sys::X509_VERIFY_PARAM_set1_ip(param, ip.octets().as_ptr(), 16)
+                }
+            };
+            if result != 1 {
+                return Err(Error::Internal(
+                    "X509_VERIFY_PARAM_set1_ip failed".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -924,13 +973,13 @@ mod tests {
             .expect("SNI が設定できること");
     }
 
-    /// SNI に DNS 名以外を渡すと拒否されること
+    /// 不正なサーバー名を拒否すること
     #[test]
     fn test_set_server_name_rejects_invalid_names() {
         let ctx = TlsContext::new_client(&[b"hq-interop"]).expect("test must succeed");
         let mut session = ctx.create_session().expect("test must succeed");
 
-        for name in ["", "127.0.0.1", "::1", "*.example.com"] {
+        for name in ["", "*.example.com", "local\0host"] {
             let err = session
                 .set_server_name(name)
                 .expect_err("不正な server_name は拒否されること");
@@ -949,6 +998,33 @@ mod tests {
             matches!(err, Error::InvalidArgument(_)),
             "255 バイト超は InvalidArgument であること: {err:?}"
         );
+    }
+
+    /// DNS 名と IP を設定し直した場合、IP を SNI に載せず古い SNI も取り除くこと
+    #[test]
+    fn test_set_server_name_switches_between_dns_and_ip() {
+        let ctx = TlsContext::new_client(&[b"hq-interop"]).expect("コンテキストを作成できること");
+        let mut session = ctx.create_session().expect("セッションを作成できること");
+        for name in ["localhost", "127.0.0.1", "localhost", "::1", "localhost"] {
+            session
+                .set_server_name(name)
+                .expect("DNS 名と IP を設定できること");
+            // SAFETY: session は有効。aws-lc はクライアントでも設定済みの SNI を返す。
+            // 返された文字列は SSL が所有し、次の設定変更まで有効である。
+            let sni = unsafe {
+                aws_lc_sys::SSL_get_servername(session.ssl, aws_lc_sys::TLSEXT_NAMETYPE_host_name)
+            };
+            if name.parse::<std::net::IpAddr>().is_ok() {
+                assert!(sni.is_null(), "IP の場合は SNI が設定されないこと");
+            } else {
+                assert!(!sni.is_null(), "DNS 名の場合は SNI が設定されること");
+                // SAFETY: sni は上で NULL でないことを確認した NUL 終端の文字列である。
+                assert_eq!(
+                    unsafe { std::ffi::CStr::from_ptr(sni) }.to_bytes(),
+                    name.as_bytes()
+                );
+            }
+        }
     }
 
     /// ハンドシェイク前は ALPN が未交渉であること
