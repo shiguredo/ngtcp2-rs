@@ -1,7 +1,7 @@
 # 送信中のデータのバッファを ACK まで移動・解放しないようにする
 
 - Created: 2026-10-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-24
 - Branch: feature/fix-in-flight-buffer-pointer-stability
 - Polished: {YYYY-MM-DD}
 
@@ -67,3 +67,20 @@ drain と併発する構成では 18 回中 9 回、再送 2400 バイトすべ�
 - 再送時に解放済みメモリを参照しない (ASAN もしくは等価な手段で確認する)
 - 長大なストリームで未 ACK データの保持量がデータ量の二乗に増えない
 - `cargo test --workspace --tests --features source-build`、`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --features source-build -- -D warnings` が成功する
+
+## 解決方法
+
+`ngtcp2/src/conn.rs` の `InFlightStreamData` を、ngtcp2 に渡したバッファを ACK されるまで移動・解放しない構造に変更した。
+
+- `ack_until` から `Vec::drain(..start)` による詰め直しを削除し、未 ACK のバイト列を移動しないようにした
+- `append` で容量が足りない場合、`Vec` を再確保せずに新しい領域へ未 ACK のデータを写し、ngtcp2 が参照している旧領域は `RetiredBuffer` として ACK されるまで保持する
+- `ack_until` で ACK が進んだときに、参照が不要になった `RetiredBuffer` を解放する
+- doc コメントに、バッファを移動・解放しない理由と `RetiredBuffer` の役割を明記した
+
+`ngtcp2/src/conn.rs` の単体テストに、領域を差し替えても旧領域の内容が変わらないことと、ACK で未 ACK のバイト列が移動しないことを追加した。また `ngtcp2/tests/test_buffer_lifetime.rs` を追加し、実 TLS ハンドシェイクをした 2 つの `Connection` 間でパケットを手動配送して、64 KiB 超の ACK 後の損失再送 (drain 経路) と追記による領域差し替え後の損失再送 (realloc 経路) の両方で、再送後の受信データが元のバイト列と一致することを検証する。
+
+### 検証
+
+- 追加した回帰テストは修正前のコードで、64 KiB 超の ACK 後の再送データが offset 66687 から破損して失敗し、修正後は成功した
+- `cargo test --workspace --tests --features source-build` が成功した
+- `cargo fmt --all -- --check` と `cargo clippy --workspace --all-targets --features source-build -- -D warnings` が成功した
