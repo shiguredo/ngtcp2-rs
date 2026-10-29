@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_ngtcp2"
-version = "2026.1.0-canary.2"
+version = "2026.1.0-canary.3"
 dependencies = [
  "aws-lc-rs",
  "libc",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_ngtcp2_sys"
-version = "2026.1.0-canary.2"
+version = "2026.1.0-canary.3"
 dependencies = [
  "aws-lc-sys",
  "bindgen",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_ngtcp2_tokio"
-version = "2026.1.0-canary.2"
+version = "2026.1.0-canary.3"
 dependencies = [
  "libc",
  "rcgen",
