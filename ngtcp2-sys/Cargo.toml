@@ -35,15 +35,17 @@ path = "src/lib.rs"
 # TLS バックエンド (ssl feature で SSL / SSL_CTX を提供する)
 #
 # バージョンを固定する。ngtcp2 のビルドも同じ aws-lc をリンクするため、
-# 複数バージョンが解決されるとシンボルが衝突する。aws-lc-rs 1.18.1 が
-# 要求する aws-lc-sys 0.45 に固定する。
-aws-lc-sys = { version = "=0.45.0", features = ["ssl"] }
+# 複数バージョンが解決されるとシンボルが衝突する。aws-lc-rs 1.19.0 が
+# 要求する aws-lc-sys 0.47 に固定する。
+# prebuilt は aws-lc-sys 0.47 のシンボル prefix で作る必要があるため、
+# このバージョンはリリースフロー (release.yml) と合わせて管理する。
+aws-lc-sys = { version = "=0.47.0", features = ["ssl"] }
 # sockaddr / c_int などの C 型
 libc = "0.2"
 
 [build-dependencies]
 # overwrite feature でのみ使用する (通常ビルドでは libclang 不要)
-bindgen = { version = "0.72", optional = true }
+bindgen = { version = "0.73", optional = true }
 # ngtcp2 のビルドで使用する cmake の取得
 shiguredo_cmake = "4.4"
 # Cargo.toml からのメタデータ読み取り

@@ -1,0 +1,9 @@
+# interop 用の toolchain
+#
+# s2n-quic 1.90 以降は rustc 1.95 を要求するため、ルートの rust-toolchain.toml
+# (MSRV 1.93) とは別に 1.95 を使う。interop はルートの workspace から exclude
+# された独立 workspace のため、このディレクトリ配下ではこちらが使われる。
+# s2n-quic の rust-version 要件に合わせて更新すること。
+[toolchain]
+channel = "1.95"
+components = ["rustfmt", "clippy"]

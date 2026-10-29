@@ -1317,6 +1317,14 @@ pub struct Server {
     addr_map: HashMap<SocketAddr, ConnectionId>,
     // Stateless Reset トークンを導出するための秘密 (RFC 9000 Section 10.3.1)
     stateless_reset_secret: Option<StatelessResetSecret>,
+    // Retry トークンを導出するための秘密 (RFC 9000 Section 8.1.2)
+    //
+    // ngtcp2 が Retry を要求したとき (ERR_RETRY) に Retry を送るために使う。
+    // ServerConfig::with_retry で秘密が明示された構成ではその秘密を使う。明示が
+    // 無い構成では、ClientHello が複数 Initial に分かれるクライアント (BoringSSL
+    // が既定の key share に X25519MLKEM768 を含めるなど) に対応するため、この
+    // サーバーの寿命の間だけ有効な秘密を生成する (詳細は bind のコメント)。
+    retry_secret: RetrySecret,
     // Stateless Reset の送信レート制限 (RFC 9000 Section 10.3.3)
     stateless_reset_limiter: StatelessResetLimiter,
     // accept で引き渡し済みの CID (Stateless Reset の抑止に使う)
@@ -1393,11 +1401,28 @@ impl Server {
             .clone()
             .or_else(StatelessResetSecret::generate);
 
+        // Retry トークンの導出に使う秘密 (RFC 9000 Section 8.1.2)。
+        //
+        // ngtcp2 は ClientHello が複数 Initial に分かれる Initial (トークン無し) を
+        // 受けると Retry を要求する。BoringSSL が既定の key share に X25519MLKEM768
+        // のような PQ ハイブリッドを含める実装では ClientHello が 1200 バイトを超え、
+        // この要求が発生するため、秘密が明示されない構成でも Retry を送れるように
+        // このサーバーの寿命の間だけ有効な秘密を生成する。
+        //
+        // 複数のサーバープロセスでトークンを検証し合う場合は
+        // [`ServerConfig::with_retry`] で秘密を明示する。
+        let retry_secret = config
+            .retry_secret
+            .clone()
+            .or_else(RetrySecret::generate)
+            .ok_or_else(|| Error::Internal("failed to generate retry secret".to_string()))?;
+
         Ok(Self {
             sockets,
             local_addr,
             tls_ctx: Arc::new(tls_ctx),
             config,
+            retry_secret,
             connections: HashMap::new(),
             cid_map: HashMap::new(),
             short_cid_lengths,
@@ -1512,12 +1537,34 @@ impl Server {
     ) {
         // 既存接続へのパケットか判定する (RFC 9000 Section 5.2)
         //
-        // コネクション ID で解決できない場合はピアのアドレスで解決する。
-        // サーバーが長さ 0 のコネクション ID を使う場合、パケットには
-        // コネクション ID が載らないため、これが唯一の手がかりになる
-        // (RFC 9000 Section 5.1)。
-        let conn_key = resolve_dcid(&self.cid_map, &self.short_cid_lengths, data)
-            .or_else(|| self.addr_map.get(&from).cloned());
+        // コネクション ID で解決できなかった場合のフォールバックを考える。
+        //
+        // - Short header パケットはコネクション ID が載らないため、サーバーが
+        //   長さ 0 のコネクション ID を使う構成ではピアのアドレスでのみ解決できる
+        //   (RFC 9000 Section 5.1)
+        // - 長さ 0 のコネクション ID の接続宛ての Long header パケット (Initial /
+        //   Handshake) も DCID が載らないため、ピアのアドレスで解決する
+        //
+        // 長さが 1 以上のコネクション ID を持つ Long header パケットはアドレスで
+        // 解決しない。Token 付き Initial (DCID は Retry の SCID) をアドレスで
+        // 既存接続に振り分けると、Retry を受理して接続を作り直すべき Initial が
+        // トークンを持たない古い接続に届き、ハンドシェイクが進まなくなる。
+        let conn_key = match resolve_dcid(&self.cid_map, &self.short_cid_lengths, data) {
+            Some(key) => Some(key),
+            None => {
+                let is_long_header = data.first().is_some_and(|first| first & 0x80 != 0);
+                let dcid_len = if is_long_header {
+                    data.get(5).copied().map_or(usize::MAX, |len| len as usize)
+                } else {
+                    0
+                };
+                if !is_long_header || dcid_len == 0 {
+                    self.addr_map.get(&from).cloned()
+                } else {
+                    None
+                }
+            }
+        };
 
         match conn_key {
             Some(key) => {
@@ -1723,62 +1770,83 @@ impl Server {
 
         // アドレス検証 (RFC 9000 Section 8.1.2)。
         // 検証に使う Original DCID とトークンはここで確定する。
+        //
+        // トークン無し Initial への応答方針:
+        //
+        // - [`ServerConfig::with_retry`] で秘密が明示された構成では、トークンが
+        //   無い Initial に常に Retry を返す
+        // - 明示が無い構成では Retry を積極的に送らない (クライアントの 0-RTT の
+        //   遅延を増やさないため)。ClientHello が複数 Initial に分かれるクライアント
+        //   (BoringSSL が既定の key share に X25519MLKEM768 を含めるなど) では
+        //   ngtcp2 が Retry を要求する (ERR_RETRY) ので、そのときにだけ Retry を
+        //   送る (後段)
+        //
         // 秘密は send_retry で &mut self を使うため先に複製する。
-        let retry_secret = self.config.retry_secret.clone();
+        let immediate_retry_secret = self.config.retry_secret.clone();
+        // Retry トークンの検証に使う秘密。
+        //
+        // 明示が無い構成でも、後段で Retry を送ったクライアントが載せてくる
+        // トークンを検証できるよう、実効的な秘密を使う。
+        let effective_retry_secret = immediate_retry_secret
+            .clone()
+            .unwrap_or_else(|| self.retry_secret.clone());
         let mut original_dcid = accepted.dcid.clone();
         let mut address_validation_token = None;
         // Retry を送ったかどうか。Retry の SCID を再利用するかと、
         // retry_source_connection_id を通知するかに使う
         let mut retried = false;
-        if let Some(secret) = &retry_secret {
-            match AddressValidationToken::from_packet(accepted.token.clone()) {
-                // トークンが無いなら Retry を返して接続状態を作らない
-                None => {
+        match AddressValidationToken::from_packet(accepted.token.clone()) {
+            // トークンが無い Initial。明示された構成では常に Retry を返し、
+            // 接続状態を作らない。明示が無い構成ではそのまま ngtcp2 に処理させる
+            // (ClientHello に欠落があると ngtcp2 が Retry を要求し、後段で Retry
+            // を送る)
+            None => {
+                if let Some(secret) = &immediate_retry_secret {
                     self.send_retry(&accepted, version, secret, from, local_addr, ts)
                         .await;
                     return;
                 }
-                Some(token) => {
-                    let result = match token.kind() {
-                        // Retry のトークンには最初の DCID が埋め込まれている。
-                        // パケットの DCID は Retry の SCID なので使えない
-                        // (RFC 9000 Section 7.3)。
-                        AddressValidationTokenKind::Retry => verify_retry_token(
-                            secret,
-                            token.as_bytes(),
-                            version,
-                            from,
-                            &accepted.dcid,
-                            self.config.retry_token_timeout,
-                            ts,
-                        )
-                        .map(|odcid| {
-                            original_dcid = odcid;
-                            retried = true;
-                        }),
-                        // NEW_TOKEN のトークンには DCID が埋め込まれていない。
-                        // クライアントは新しい DCID を選ぶため、Initial の DCID を
-                        // Original Destination Connection ID として扱う
-                        // (RFC 9000 Section 7.3)。
-                        AddressValidationTokenKind::NewToken => verify_new_token(
-                            secret,
-                            token.as_bytes(),
-                            from,
-                            self.config.retry_token_timeout,
-                            ts,
-                        ),
-                    };
+            }
+            Some(token) => {
+                let result = match token.kind() {
+                    // Retry のトークンには最初の DCID が埋め込まれている。
+                    // パケットの DCID は Retry の SCID なので使えない
+                    // (RFC 9000 Section 7.3)。
+                    AddressValidationTokenKind::Retry => verify_retry_token(
+                        &effective_retry_secret,
+                        token.as_bytes(),
+                        version,
+                        from,
+                        &accepted.dcid,
+                        self.config.retry_token_timeout,
+                        ts,
+                    )
+                    .map(|odcid| {
+                        original_dcid = odcid;
+                        retried = true;
+                    }),
+                    // NEW_TOKEN のトークンには DCID が埋め込まれていない。
+                    // クライアントは新しい DCID を選ぶため、Initial の DCID を
+                    // Original Destination Connection ID として扱う
+                    // (RFC 9000 Section 7.3)。
+                    AddressValidationTokenKind::NewToken => verify_new_token(
+                        &effective_retry_secret,
+                        token.as_bytes(),
+                        from,
+                        self.config.retry_token_timeout,
+                        ts,
+                    ),
+                };
 
-                    match result {
-                        Ok(()) => address_validation_token = Some(token),
-                        Err(e) => {
-                            // 不正なトークンには接続状態を作らずに
-                            // INVALID_TOKEN を返す (RFC 9000 Section 8.1.3)
-                            tracing::warn!("rejected address validation token: {e}");
-                            self.send_invalid_token_close(&accepted, version, from, local_addr)
-                                .await;
-                            return;
-                        }
+                match result {
+                    Ok(()) => address_validation_token = Some(token),
+                    Err(e) => {
+                        // 不正なトークンには接続状態を作らずに
+                        // INVALID_TOKEN を返す (RFC 9000 Section 8.1.3)
+                        tracing::warn!("rejected address validation token: {e}");
+                        self.send_invalid_token_close(&accepted, version, from, local_addr)
+                            .await;
+                        return;
                     }
                 }
             }
@@ -1789,8 +1857,14 @@ impl Server {
             return;
         }
 
-        // 同じ Original DCID の Initial 再送は既存接続として扱う
-        if self.cid_map.contains_key(&original_dcid) {
+        // 同じ Original DCID の Initial 再送は既存接続として扱う。
+        //
+        // トークンが無い Initial の場合だけ重複を見る。クライアントは Retry を
+        // 受け取ると Destination Connection ID を Retry の SCID に変えるため、
+        // Token 付き Initial はトークン検証が済んだ新しい接続として作り直すほうが
+        // 正しい (RFC 9000 Section 8.1.2)。トークン無し Initial で接続を先に作った
+        // 場合でも、トークン検証済みの Initial はそれとは別物として受理する。
+        if address_validation_token.is_none() && self.cid_map.contains_key(&original_dcid) {
             return;
         }
 
@@ -1881,11 +1955,11 @@ impl Server {
             preferred_addr_cid = Some(cid);
         }
 
-        // NEW_TOKEN の配布に使う秘密。Retry と同じ秘密を使うため、
-        // Retry が無効な場合は配布しない
+        // NEW_TOKEN の配布に使う秘密。Retry と同じ秘密を使う。明示が無い構成でも
+        // Server::bind が生成した秘密で発行し、同じサーバー内で検証できる
         let address_validated = address_validation_token.is_some();
         let new_token_secret = if self.config.new_token {
-            retry_secret.clone()
+            Some(effective_retry_secret.clone())
         } else {
             None
         };
@@ -1943,16 +2017,26 @@ impl Server {
         // 受信した Initial を処理する
         let result = read_packet(&mut server_conn, local_addr, from, data, ts, ecn);
 
-        // ngtcp2 が Retry を要求した場合は接続を破棄して Retry を返す
-        // (ngtcp2 の `ngtcp2_conn_read_pkt` の契約)。トークンを検証できた場合でも
-        // クライアントの Initial が 1 パケットに収まっていない場合などに発生する。
-        if let Err(e) = &result
-            && e.is_retry_required()
-            && let Some(secret) = &retry_secret
-        {
-            self.send_retry(&accepted, version, secret, from, local_addr, ts)
-                .await;
-            return;
+        match &result {
+            // ngtcp2 は ClientHello が欠落から始まる Initial (トークンが無い) を
+            // 受けると Retry を要求する (RFC 9000 Section 8.1.2)。Retry を送って
+            // 接続を作り直す。
+            //
+            // ClientHello が 1 パケットに収まるクライアントではこの要求は発生しない
+            // ため、通常の接続フローと 0-RTT の挙動は変わらない。
+            Err(e) if e.is_retry_required() => {
+                let secret = effective_retry_secret.clone();
+                self.send_retry(&accepted, version, &secret, from, local_addr, ts)
+                    .await;
+                return;
+            }
+            // パケット単位の破棄 (Ignore 分類) では接続自体は継続する。以後の
+            // Initial 再送を既存接続として処理できるよう、ルーティング登録に進む
+            Err(e) if e.classify_connection_error() == ConnectionErrorKind::Ignore => {}
+            // それ以外のエラーでは ngtcp2 が接続の継続を認めないため、接続を破棄し
+            // ルーティングテーブルへの登録も行わない
+            Err(_) => return,
+            Ok(()) => {}
         }
 
         // ルーティングテーブルへの登録
@@ -1969,6 +2053,13 @@ impl Server {
             self.addr_map.insert(from, conn_key.clone());
         } else {
             self.cid_map.insert(server_scid.clone(), conn_key.clone());
+        }
+        // Token 付き Initial で接続を作り直す場合、同じ Original DCID を指していた
+        // 古い経路は、クライアントが Retry を受理して DCID を Retry の SCID に変えて
+        // いるため、もう使われない。上書きではなく除去する。上書きしてしまうと
+        // ngtcp2 は DCID が接続の SCID と一致しないパケットを受理できない。
+        if retried {
+            self.cid_map.remove(&original_dcid);
         }
         self.cid_map.insert(original_dcid.clone(), conn_key.clone());
 
@@ -2031,7 +2122,13 @@ impl Server {
         local: SocketAddr,
         ts: u64,
     ) {
-        let Some(retry_scid) = generate_scid(self.config.scid_len) else {
+        // Retry パケットの SCID は RFC 9000 Section 17.2.5 により 8 バイト以上で
+        // なければならない。長さ 0 のコネクション ID を使う構成でも Retry には
+        // 独立した SCID を生成する。クライアントは Retry を受理すると Destination
+        // Connection ID を Retry の SCID に変えるため、Token 付き Initial はこの
+        // SCID を宛先に届き、トークン検証済みの新しい接続として処理される。
+        let retry_scid_len = self.config.scid_len.max(8);
+        let Some(retry_scid) = generate_scid(retry_scid_len) else {
             tracing::error!("failed to generate retry scid");
             return;
         };

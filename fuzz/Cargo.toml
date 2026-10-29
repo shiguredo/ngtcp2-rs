@@ -59,7 +59,7 @@ test = false
 
 [dependencies]
 # fuzz 入力からの構造化データ生成 (接続 fuzz のロール選択に使う)
-arbitrary = { version = "1.4", features = ["derive"] }
+arbitrary = { version = "1.5", features = ["derive"] }
 # fuzz ターゲットのランタイム (libFuzzer)
 libfuzzer-sys = "0.4"
 # サーバー接続に使う自己署名証明書の生成

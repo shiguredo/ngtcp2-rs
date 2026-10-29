@@ -78,7 +78,7 @@ impl ConnectionHook for ClientCaHook {
         &self,
         settings: TlsCertificatePaths<'_>,
     ) -> Option<SslContextBuilder> {
-        let mut builder = SslContextBuilder::new(SslMethod::tls_client()).ok()?;
+        let mut builder = SslContextBuilder::new(SslMethod::tls()).ok()?;
         builder.set_ca_file(settings.cert).ok()?;
         builder.set_verify(SslVerifyMode::PEER);
         Some(builder)
@@ -102,8 +102,6 @@ struct EchoClientApp {
     done: bool,
     /// 結果を渡すチャネル
     outcome: Option<oneshot::Sender<Result<Vec<u8>, String>>>,
-    /// ワーカーが送信パケットを書き込むバッファ
-    buffer: Vec<u8>,
 }
 
 impl EchoClientApp {
@@ -116,7 +114,6 @@ impl EchoClientApp {
             fin: false,
             done: false,
             outcome: Some(outcome),
-            buffer: vec![0u8; MAX_DATAGRAM_SIZE],
         }
     }
 
@@ -149,10 +146,6 @@ impl ApplicationOverQuic for EchoClientApp {
 
     fn should_act(&self) -> bool {
         !self.done
-    }
-
-    fn buffer(&mut self) -> &mut [u8] {
-        &mut self.buffer
     }
 
     fn wait_for_data(
@@ -298,8 +291,6 @@ struct EchoServerApp {
     reported: bool,
     /// ピアが閉じたことを書き出し済みかどうか
     close_reported: bool,
-    /// ワーカーが送信パケットを書き込むバッファ
-    buffer: Vec<u8>,
 }
 
 impl EchoServerApp {
@@ -312,7 +303,6 @@ impl EchoServerApp {
             extra_scid_issued: false,
             reported: false,
             close_reported: false,
-            buffer: vec![0u8; MAX_DATAGRAM_SIZE],
         }
     }
 
@@ -405,10 +395,6 @@ impl ApplicationOverQuic for EchoServerApp {
     fn should_act(&self) -> bool {
         // ピアが閉じたことを観測するまでアプリケーションを動かし続ける
         true
-    }
-
-    fn buffer(&mut self) -> &mut [u8] {
-        &mut self.buffer
     }
 
     fn wait_for_data(

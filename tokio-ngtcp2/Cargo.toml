@@ -96,7 +96,7 @@ libc = "0.2"
 # sans-IO な QUIC コア
 shiguredo_ngtcp2.workspace = true
 # 非同期ランタイム
-tokio = { version = "1.53", features = ["full"] }
+tokio = { version = "1.54", features = ["full"] }
 # ログ出力 (フィルタリングは利用側が tracing-subscriber で行う)
 tracing = "0.1"
 

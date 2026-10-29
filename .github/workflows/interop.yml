@@ -23,13 +23,14 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # rust-toolchain.toml に固定した MSRV のツールチェーンを導入する
+      # rust-toolchain.toml に固定したツールチェーンを導入する
+      # (interop は s2n-quic 1.90 以降の rustc 1.95 要件に合わせて 1.95 を使う)
       - run: rustup show
 
       - uses: shiguredo/github-actions/.github/actions/rust-cache@main
         with:
           os: ${{ matrix.os }}
-          toolchain: "1.93"
+          toolchain: "1.95"
           # ルートの workspace とは別の target ディレクトリを使う
           target-dir: interop/target
 
