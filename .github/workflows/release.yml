@@ -9,8 +9,32 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  verify-version:
+    name: "Verify the ngtcp2 version"
+    # ngtcp2 と aws-lc を C でビルドするため Go と CMake が必要になる。
+    # ubuntu-slim には導入されていないため ubuntu-24.04 を使う
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - run: rustup show
+
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ubuntu-24.04
+          toolchain: "1.93"
+
+      # 同梱の bindings.rs と、Cargo.toml で固定したコミットからビルドした
+      # ngtcp2 のバージョンが一致することを確認する。食い違ったまま prebuilt を
+      # 配布すると、利用者のビルドで callbacks 構造体のバージョン不一致による
+      # abort につながるため、リリースの作成前にここで止める
+      - name: Verify the version matches bindings.rs
+        run: cargo test -p shiguredo_ngtcp2_sys --features source-build test_ngtcp2_version
+
   github-release:
     name: "Create GitHub Release"
+    needs: [verify-version]
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.get_version.outputs.VERSION }}
