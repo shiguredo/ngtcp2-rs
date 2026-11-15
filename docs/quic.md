@@ -136,8 +136,8 @@
 [draft-ietf-quic-reliable-stream-reset](https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/)
 は、リセットの時点までに送ったデータの配信を保証する RESET_STREAM_AT を追加する。
 
-このライブラリは ngtcp2 の `reliable-stream-reset` 分岐をビルドして使うため、
-この仕組みを利用できる。
+このライブラリは ngtcp2 の `reliable-stream-reset` 分岐の固定コミットをビルドして
+使うため、この仕組みを利用できる。
 
 ピアが `reset_stream_at` を通知している場合に使える。
 

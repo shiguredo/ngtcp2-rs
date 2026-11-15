@@ -3,9 +3,9 @@
 //! このクレートは ngtcp2 C ライブラリへの低レベル FFI バインディングを提供する。
 //!
 //! ngtcp2 のソースコードは `build.rs` が `Cargo.toml` の
-//! `[package.metadata.external-dependencies.ngtcp2]` が指すブランチ
-//! (`reliable-stream-reset`) を取得して CMake でビルドする。
-//! `bindings.rs` は同じブランチから生成したものを同梱している。
+//! `[package.metadata.external-dependencies.ngtcp2]` が指すコミット
+//! (`reliable-stream-reset` 分岐の 1.26.90) を取得して CMake でビルドする。
+//! `bindings.rs` は同じコミットから生成したものを同梱している。
 
 // bindgen が生成したコードは Rust の命名規則に従わないため、該当する lint を抑制する。
 // C の構造体・定数名をそのまま維持しないと、どの FFI 項目がどのヘッダー由来か
@@ -54,10 +54,9 @@ mod tests {
             .to_str()
             .expect("バージョン文字列は UTF-8 であるべき");
 
-        // ngtcp2 のリポジトリは可動ブランチ `reliable-stream-reset` を取得するため
-        // 上流が進むと値が変わる。bindings.rs と実際にリンクされたライブラリの
-        // バージョンが一致していることを確認する (食い違うと構造体レイアウトが
-        // ずれて未定義動作になる)。
+        // 取得元は `Cargo.toml` でコミットに固定している。bindings.rs と実際に
+        // リンクされたライブラリのバージョンが一致していることを確認する
+        // (食い違うと構造体レイアウトがずれて未定義動作になる)。
         //
         // NGTCP2_VERSION は NUL 終端を含むバイト列。
         assert_eq!(
@@ -84,8 +83,8 @@ mod tests {
     #[test]
     fn test_settings_version() {
         assert_eq!(
-            NGTCP2_SETTINGS_VERSION, 4,
-            "ngtcp2 1.25.0 の settings バージョン"
+            NGTCP2_SETTINGS_VERSION, 5,
+            "ngtcp2 1.26.0 の settings バージョン"
         );
     }
 

@@ -66,7 +66,7 @@ fuzz は CI では実行しません。まとめて実行したい場合は [Fuz
 
 ## バインディングの再生成
 
-`ngtcp2-sys/src/bindings.rs` は ngtcp2 のブランチ `reliable-stream-reset` から生成したものを同梱しています。ngtcp2 側が更新されて構造体レイアウトが変わった場合は再生成してください。
+`ngtcp2-sys/src/bindings.rs` は `ngtcp2-sys/Cargo.toml` で固定した ngtcp2 のコミット (1.26.90) から生成したものを同梱しています。ngtcp2 側が更新されて構造体レイアウトが変わった場合は再生成してください。
 
 `overwrite` feature を指定するとソースからビルドした上で再生成します (`source-build` も同時に有効になります)。
 

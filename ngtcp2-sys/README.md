@@ -12,16 +12,17 @@ Rust から利用するための低レベル FFI バインディングを提供�
 
 ## 特徴
 
-- ngtcp2 のソースコードをブランチ指定で取得して CMake でビルド
+- ngtcp2 のソースコードをコミット指定で取得して CMake でビルド
 - aws-lc を TLS バックエンドとして使用
 - 生成済みバインディングを同梱 (通常ビルドでは libclang 不要)
 
 ## ngtcp2 のバージョン
 
-`Cargo.toml` の `[package.metadata.external-dependencies]` でブランチ
-`reliable-stream-reset` を指定しています。`build.rs` はビルドのたびにこのブランチの
-最新コミットを取得するため、上流が進むと同梱の `bindings.rs` と構造体レイアウトが
-食い違う可能性があります。`src/lib.rs` のテストがバージョンの一致を検証します。
+`Cargo.toml` の `[package.metadata.external-dependencies]` で、reliable stream reset
+(RESET_STREAM_AT) を実装した分岐 `reliable-stream-reset` のコミット (1.26.90) を固定
+しています。分岐は force-push で書き換わるため、ブランチ名ではなくコミットを指定して
+います。`src/lib.rs` のテストが、同梱の `bindings.rs` と実際にリンクした ngtcp2 の
+バージョンの一致を検証します。
 
 バインディングを再生成する場合:
 

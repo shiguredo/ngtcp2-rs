@@ -27,6 +27,8 @@ prebuilt を配布しているプラットフォームは次のとおりです�
 
 - prebuilt を配布していないプラットフォーム (macOS の x86_64 など)
 - ngtcp2 のソースを変更してビルドしたい場合
+- 同梱の `bindings.rs` が、公開済みの crate の prebuilt より新しい ngtcp2 を指している場合
+  (ngtcp2 のバージョンを上げた直後は、新しい prebuilt を含むリリースまで source-build が必要です)
 
 ```toml
 [dependencies]
@@ -41,7 +43,7 @@ shiguredo_ngtcp2_tokio = { version = "2026.1", features = ["source-build"] }
 - Go
   - aws-lc のビルドに必要です
 
-ngtcp2 のソースは `ngtcp2-sys/build.rs` がビルド時に取得します。取得先は ngtcp2 のブランチ `reliable-stream-reset` です。ネットワークに接続できない環境ではビルドできません。
+ngtcp2 のソースは `ngtcp2-sys/build.rs` がビルド時に取得します。取得先は ngtcp2 の `reliable-stream-reset` 分岐のコミット (1.26.90) で、`ngtcp2-sys/Cargo.toml` の `[package.metadata.external-dependencies]` で固定しています。ネットワークに接続できない環境ではビルドできません。
 
 ## 環境変数
 

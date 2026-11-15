@@ -88,8 +88,10 @@ async fn test_qlog_files_are_written() {
         );
         let body = std::fs::read_to_string(path).expect("qlog を読めること");
         assert!(!body.is_empty(), "qlog が空でないこと: {name}");
+        // ngtcp2 1.26.90 では qlog のヘッダーが qlog ファイルスキーマ
+        // (file_schema / serialization_format) になっている
         assert!(
-            body.contains("\"qlog_version\""),
+            body.contains("\"file_schema\""),
             "qlog のヘッダーが含まれること: {name}"
         );
     }

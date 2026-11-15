@@ -109,15 +109,15 @@ pub use version::{
 ///
 /// ビルドに使われた ngtcp2 のバージョンを返す。取得に失敗した場合は `"unknown"`。
 pub fn ngtcp2_version() -> &'static str {
-    // ngtcp2 のリポジトリは可動ブランチ `reliable-stream-reset` を取得するため、
-    // 上流が進むと値が変わる。テストではこの定数と突き合わせる。
+    // 取得元は `ngtcp2-sys/Cargo.toml` でコミットに固定しているため、上流が進んでも
+    // 値は変わらない。テストではこの定数と突き合わせる。
     version_string()
 }
 
 /// ビルドに使われた ngtcp2 のバージョン文字列 (コンパイル時定数)
 ///
 /// `bindings.rs` の `NGTCP2_VERSION` と同じ値。
-pub const NGTCP2_VERSION: &str = "1.25.90";
+pub const NGTCP2_VERSION: &str = "1.26.90";
 
 /// 実際にリンクされた ngtcp2 からバージョン文字列を取得する
 fn version_string() -> &'static str {

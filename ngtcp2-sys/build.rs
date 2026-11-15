@@ -3,7 +3,7 @@
 //! 既定では GitHub Releases から prebuilt の静的ライブラリをダウンロードする。
 //! `source-build` feature を有効にすると ngtcp2 をソースからビルドする。
 //!
-//! ビルド元 (git URL とタグ) は Cargo.toml の
+//! ビルド元 (git URL とコミット) は Cargo.toml の
 //! `[package.metadata.external-dependencies.ngtcp2]` から読む。
 //! バージョンを上げるときは Cargo.toml と bindings.rs の両方を更新すること。
 
@@ -79,9 +79,15 @@ fn fetch_ngtcp2(out_dir: &Path) -> PathBuf {
         .expect("Missing 'git' field in ngtcp2 dependency");
     let branch = dep.get("branch").and_then(|v| v.as_str());
     let version = dep.get("version").and_then(|v| v.as_str());
+    let commit = dep.get("rev").and_then(|v| v.as_str());
 
-    if branch.is_none() && version.is_none() {
-        panic!("ngtcp2 dependency requires either 'branch' or 'version'");
+    // 3 つを同時に指定するとどれを使うか曖昧になるため、ちょうど 1 つに限る
+    let specified = [version.is_some(), branch.is_some(), commit.is_some()]
+        .into_iter()
+        .filter(|specified| *specified)
+        .count();
+    if specified != 1 {
+        panic!("ngtcp2 dependency requires exactly one of 'version', 'branch' or 'rev'");
     }
 
     let ngtcp2_dir = out_dir.join("ngtcp2");
@@ -109,23 +115,42 @@ fn fetch_ngtcp2(out_dir: &Path) -> PathBuf {
         }
     }
 
-    // タグ (version) を優先する。タグが指定されていれば可動ブランチより再現性が高い
-    let rev = match (version, branch) {
-        (Some(ver), _) => format!("v{ver}"),
-        (None, Some(branch_name)) => branch_name.to_string(),
-        (None, None) => unreachable!("checked above"),
+    // タグ (version) は不変であるため最も再現性が高い。次にコミット (rev)、
+    // 最後に可動ブランチ (branch) の順に再現性が下がる
+    let rev = match (version, commit, branch) {
+        (Some(ver), _, _) => format!("v{ver}"),
+        (_, Some(commit), _) => commit.to_string(),
+        (_, _, Some(branch_name)) => branch_name.to_string(),
+        (None, None, None) => unreachable!("checked above"),
     };
 
-    let status = Command::new("git")
-        .current_dir(&ngtcp2_dir)
-        .args(["checkout", "--force", &rev])
-        .status()
-        .expect("Failed to execute git checkout");
-    if !status.success() {
+    let mut checked_out = checkout(&ngtcp2_dir, &rev);
+    if !checked_out && commit.is_some() {
+        // 分岐が force-push されて clone にコミットが含まれない場合、GitHub は
+        // 到達可能なコミットなら直接取得できる。到達できなければ下で panic する
+        let _ = Command::new("git")
+            .current_dir(&ngtcp2_dir)
+            .args(["fetch", "origin", &rev])
+            .status();
+        checked_out = checkout(&ngtcp2_dir, &rev);
+    }
+
+    if !checked_out {
         panic!("Failed to checkout {rev} in ngtcp2");
     }
 
     ngtcp2_dir
+}
+
+/// ngtcp2 のソースを指定したリビジョンへ切り替える
+///
+/// 切り替えに成功したら true を返す。
+fn checkout(ngtcp2_dir: &Path, rev: &str) -> bool {
+    Command::new("git")
+        .current_dir(ngtcp2_dir)
+        .args(["checkout", "--force", rev])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn main() {
