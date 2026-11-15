@@ -2051,14 +2051,14 @@ unsafe extern "C" fn select_preferred_addr_callback(
     }
 
     // SAFETY: conn は呼び出し中だけ有効。現在の経路は同じアドレスファミリを
-    // 判定するために読むだけ。アドレスはプラットフォームの sockaddr として
-    // 解釈する (バインディングの構造体は生成環境のフィールド配置を持つ)
+    // 判定するために読むだけ。バインディングのソケット型は libc の型そのものなので、
+    // そのままフィールドを読める
     let family = unsafe {
         let path = ngtcp2_conn_get_path2(conn);
         if path.is_null() || (*path).local.addr.is_null() {
             return 0;
         }
-        let addr = (*path).local.addr as *mut libc::sockaddr;
+        let addr = (*path).local.addr;
         (*addr).sa_family as c_int
     };
 

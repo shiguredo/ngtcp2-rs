@@ -438,7 +438,7 @@ fn overwrite_bindgen(out_dir: &Path) {
     // aws-lc のインクルードディレクトリ (openssl/ssl.h がある場所)
     let aws_lc_include = aws_lc_include_dir();
 
-    bindgen::Builder::default()
+    let bindings = bindgen::Builder::default()
         .header(
             manifest_dir
                 .join("src/wrapper.h")
@@ -451,8 +451,190 @@ fn overwrite_bindgen(out_dir: &Path) {
         .allowlist_function("ngtcp2_.*")
         .allowlist_type("ngtcp2_.*")
         .allowlist_var("NGTCP2_.*")
+        // ソケット型はシステムヘッダー由来でプラットフォームごとに定義が異なる。
+        // bindings.rs を全プラットフォームで共用するため、生成後に libc の型へ
+        // 置き換える (replace_platform_socket_types を参照)
+        .raw_line("// ソケット型はプラットフォームごとに定義が異なるため、libc の型を使う")
+        .raw_line("pub use libc::{in6_addr, in_addr, in_addr_t, in_port_t, sa_family_t, sockaddr, sockaddr_in, sockaddr_in6, socklen_t};")
+        .raw_line("// NGTCP2_AF_INET6 は <sys/socket.h> の AF_INET6 を指す")
+        .raw_line("pub const NGTCP2_AF_INET6: u32 = libc::AF_INET6 as u32;")
+        // 生成される値は生成環境の AF_INET6 になるため、libc を使う定義へ差し替える
+        .blocklist_var("NGTCP2_AF_INET6")
         .generate()
-        .expect("Failed to generate ngtcp2 bindings")
-        .write_to_file(manifest_dir.join("src").join("bindings.rs"))
+        .expect("Failed to generate ngtcp2 bindings");
+
+    let bindings = replace_platform_socket_types(&bindings.to_string());
+    std::fs::write(manifest_dir.join("src").join("bindings.rs"), bindings)
         .expect("Failed to write ngtcp2 bindings");
+}
+
+/// 生成した bindings からプラットフォーム依存のソケット型を取り除く
+///
+/// ngtcp2 の構造体はソケット型を値で持つため、bindings.rs を全プラットフォームで
+/// 共用するには各プラットフォームの正しい定義 (libc) を使う必要がある。bindgen に
+/// blocklist を指定すると、それらの型を含む構造体でネイティブ union を生成できず、
+/// Copy / Clone の導出も失われる。そのため通常どおり生成してから、システムヘッダー
+/// 由来の型定義だけを取り除く。名前はファイル先頭の `pub use libc::{...}` で解決される。
+#[cfg(feature = "overwrite")]
+fn replace_platform_socket_types(bindings: &str) -> String {
+    // システムヘッダーに定義されている型 (glibc と Darwin の内部名を含む)
+    const TYPES: &[&str] = &[
+        "sockaddr",
+        "sockaddr_in",
+        "sockaddr_in6",
+        "in_addr",
+        // in6_addr の入れ子の union は in6_addr の定義の直後に出力されるため、
+        // 先に取り除く (後だと in6_addr のレイアウト検査が隣接しない)
+        "in6_addr__bindgen_ty_1",
+        "in6_addr",
+        "__socklen_t",
+        "__darwin_socklen_t",
+        "__uint8_t",
+        "__uint16_t",
+        "__uint32_t",
+        "socklen_t",
+        "sa_family_t",
+        "in_addr_t",
+        "in_port_t",
+    ];
+
+    let mut bindings = bindings.to_string();
+    for name in TYPES {
+        bindings = remove_generated_item(&bindings, name);
+    }
+    bindings
+}
+
+/// bindgen が生成した 1 つの型定義を削除する
+///
+/// 構造体・共用体は、付随するレイアウト検査 (`const _: () = { ... };`) も削除する。
+#[cfg(feature = "overwrite")]
+fn remove_generated_item(bindings: &str, name: &str) -> String {
+    for kind in ["struct", "union"] {
+        let marker = format!("pub {kind} {name} {{");
+        let Some(offset) = bindings.find(&marker) else {
+            continue;
+        };
+        let Some(end) = brace_block_end(bindings, offset + marker.len() - 1) else {
+            return bindings.to_string();
+        };
+        let start = attributes_start(bindings, offset);
+        let end = layout_assertion_end(bindings, end).unwrap_or(end);
+        let mut result = String::with_capacity(bindings.len());
+        result.push_str(&bindings[..start]);
+        result.push_str(&bindings[end..]);
+        return result;
+    }
+
+    let marker = format!("pub type {name} =");
+    if let Some(offset) = bindings.find(&marker) {
+        if let Some(end) = statement_end(bindings, offset) {
+            let start = attributes_start(bindings, offset);
+            let mut result = String::with_capacity(bindings.len());
+            result.push_str(&bindings[..start]);
+            result.push_str(&bindings[end..]);
+            return result;
+        }
+    }
+    bindings.to_string()
+}
+
+/// 指定した位置の項目に付いている属性の先頭位置を返す
+#[cfg(feature = "overwrite")]
+fn attributes_start(bindings: &str, offset: usize) -> usize {
+    let mut start = offset;
+    while start > 0 {
+        let previous_break = start - 1;
+        let previous_start = bindings[..previous_break]
+            .rfind('\n')
+            .map_or(0, |position| position + 1);
+        let line = bindings[previous_start..previous_break].trim();
+        if line.starts_with("#[") {
+            start = previous_start;
+        } else {
+            break;
+        }
+    }
+    start
+}
+
+/// 波括弧の対応を取ってブロックの終端 (行末) を返す
+///
+/// 文字列リテラル内の波括弧は数えない。
+#[cfg(feature = "overwrite")]
+fn brace_block_end(bindings: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in bindings.bytes().enumerate().skip(open) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(
+                        bindings[index..]
+                            .find('\n')
+                            .map_or(bindings.len(), |position| index + position + 1),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// セミコロンまでを含む文の終端 (行末) を返す
+#[cfg(feature = "overwrite")]
+fn statement_end(bindings: &str, offset: usize) -> Option<usize> {
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in bindings.bytes().enumerate().skip(offset) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b';' => {
+                return Some(
+                    bindings[index..]
+                        .find('\n')
+                        .map_or(bindings.len(), |position| index + position + 1),
+                );
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 型定義の直後にあるレイアウト検査ブロックの終端を返す
+#[cfg(feature = "overwrite")]
+fn layout_assertion_end(bindings: &str, offset: usize) -> Option<usize> {
+    const ALLOW: &str = "#[allow(clippy::unnecessary_operation, clippy::identity_op)]";
+    if !bindings[offset..].starts_with(ALLOW) {
+        return None;
+    }
+    let const_offset = offset + ALLOW.len();
+    let open = bindings[const_offset..].find('{')? + const_offset;
+    brace_block_end(bindings, open)
 }

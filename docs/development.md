@@ -68,6 +68,8 @@ fuzz は CI では実行しません。まとめて実行したい場合は [Fuz
 
 `ngtcp2-sys/src/bindings.rs` は `ngtcp2-sys/Cargo.toml` で固定した ngtcp2 のコミット (1.26.90) から生成したものを同梱しています。ngtcp2 側が更新されて構造体レイアウトが変わった場合は再生成してください。
 
+ソケット型 (`sockaddr` / `sockaddr_in` / `sockaddr_in6` / `socklen_t` など) はシステムヘッダー由来でプラットフォームごとに定義が異なるため、`build.rs` は bindgen の生成対象から外し、libc の型を再輸出しています。これにより `bindings.rs` は生成したプラットフォームに依存しません。
+
 `overwrite` feature を指定するとソースからビルドした上で再生成します (`source-build` も同時に有効になります)。
 
 ```bash

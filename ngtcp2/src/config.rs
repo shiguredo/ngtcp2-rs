@@ -364,49 +364,20 @@ impl TransportParams {
 
         match addr {
             SocketAddr::V4(v4) => {
-                // このフィールドを ngtcp2 はプラットフォームの sockaddr_in として
-                // 扱う。バインディングの構造体は生成環境のフィールド配置を持つため、
-                // ネイティブの構造体を作ってバイト列として写す
-                // SAFETY: sockaddr_in は全てのビットパターンが有効な POD
-                let mut sin: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+                // バインディングの sockaddr_in は libc の型そのものなので、
+                // プラットフォームのフィールドへ直接書ける
+                let sin = &mut self.0.preferred_addr.ipv4;
                 sin.sin_family = libc::AF_INET as libc::sa_family_t;
                 // アドレスとポートはネットワークバイトオーダーで保持する
                 sin.sin_port = v4.port().to_be();
                 sin.sin_addr.s_addr = u32::from(*v4.ip()).to_be();
-
-                debug_assert_eq!(
-                    std::mem::size_of::<libc::sockaddr_in>(),
-                    std::mem::size_of::<shiguredo_ngtcp2_sys::sockaddr_in>()
-                );
-                // SAFETY: どちらも同じ大きさの sockaddr_in
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        &sin as *const libc::sockaddr_in as *const u8,
-                        &mut self.0.preferred_addr.ipv4 as *mut _ as *mut u8,
-                        std::mem::size_of::<libc::sockaddr_in>(),
-                    );
-                }
                 self.0.preferred_addr.ipv4_present = 1;
             }
             SocketAddr::V6(v6) => {
-                // SAFETY: sockaddr_in6 は全てのビットパターンが有効な POD
-                let mut sin6: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+                let sin6 = &mut self.0.preferred_addr.ipv6;
                 sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
                 sin6.sin6_port = v6.port().to_be();
                 sin6.sin6_addr.s6_addr = v6.ip().octets();
-
-                debug_assert_eq!(
-                    std::mem::size_of::<libc::sockaddr_in6>(),
-                    std::mem::size_of::<shiguredo_ngtcp2_sys::sockaddr_in6>()
-                );
-                // SAFETY: どちらも同じ大きさの sockaddr_in6
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        &sin6 as *const libc::sockaddr_in6 as *const u8,
-                        &mut self.0.preferred_addr.ipv6 as *mut _ as *mut u8,
-                        std::mem::size_of::<libc::sockaddr_in6>(),
-                    );
-                }
                 self.0.preferred_addr.ipv6_present = 1;
             }
         }
