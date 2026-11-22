@@ -21,11 +21,11 @@ include = ["/LICENSE", "/README.md", "/build.rs", "/src/**"]
 # ngtcp2 本体のリポジトリから取得するコミット
 #
 # reliable stream reset (RESET_STREAM_AT) を実装した分岐 `reliable-stream-reset` の
-# 1.26.90 (2026-11-03 時点の HEAD) を固定する。分岐は force-push で書き換わるため、
+# 1.26.90 (2026-11-22 時点の HEAD) を固定する。分岐は force-push で書き換わるため、
 # ブランチ名ではなくコミットを指定する。バージョンを上げるときは、このコミットと
 # bindings.rs を同時に更新すること。
 # 再生成: cargo build -p shiguredo_ngtcp2_sys --features overwrite
-ngtcp2 = { git = "https://github.com/ngtcp2/ngtcp2", rev = "db25c2f03f3bd81150bcbe268f6bcc609c6caafe" }
+ngtcp2 = { git = "https://github.com/ngtcp2/ngtcp2", rev = "4decf4ee1ded10980ff8353c17486755041d5f10" }
 
 [lib]
 doctest = false
